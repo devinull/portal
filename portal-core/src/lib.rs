@@ -15,13 +15,15 @@ use directories::ProjectDirs;
 use thiserror::Error;
 
 use config::{Config, ConfigError, load_config, merge_metadata};
-pub use model::{Action, Device, Launch};
+pub use model::{Action, Device, Launch, LocalDevice};
 pub use rustdesk::{
     LaunchOutcome, ProvisionError, ProvisionOutcome, ProvisionPlan, ProvisionStep, RustDeskError,
     ServiceState,
 };
 use state::{StateError, load_state, merge_state};
-pub use tailscale::{DiscoveryError, TailscaleParseError, discover, parse_status};
+pub use tailscale::{
+    DiscoveryError, TailscaleParseError, discover, discover_snapshot, parse_snapshot, parse_status,
+};
 pub use theme::{Theme, ThemeColor, ThemeColorParseError};
 
 #[derive(Debug, Error)]
@@ -42,6 +44,7 @@ pub enum PortalError {
 
 #[derive(Debug)]
 pub struct Snapshot {
+    pub local_device: Option<LocalDevice>,
     pub devices: Vec<Device>,
     pub warnings: Vec<String>,
 }
@@ -86,6 +89,7 @@ pub fn resolve<'a>(devices: &'a [Device], query: &str) -> Result<&'a Device, Res
                 .as_deref()
                 .is_some_and(|value| value.eq_ignore_ascii_case(normalized_name))
                 || device.hostname.eq_ignore_ascii_case(normalized_name)
+                || device.machine_name.eq_ignore_ascii_case(normalized_name)
                 || device
                     .dns_name
                     .as_deref()
@@ -150,11 +154,13 @@ impl Portal {
     }
 
     pub fn snapshot_with_warnings(&self) -> Result<Snapshot, PortalError> {
-        let mut devices = discover(self.config.executables.tailscale.as_deref())?;
+        let discovered = discover_snapshot(self.config.executables.tailscale.as_deref())?;
+        let mut devices = discovered.devices;
         merge_metadata(&mut devices, &self.config);
         let (state, warning) = load_state(&self.state_path);
         merge_state(&mut devices, &state);
         Ok(Snapshot {
+            local_device: discovered.local_device,
             devices,
             warnings: warning.into_iter().collect(),
         })
@@ -289,6 +295,7 @@ mod resolution_tests {
         vec![
             Device {
                 id: "node-one".to_owned(),
+                machine_name: "alpha".to_owned(),
                 hostname: "alpha".to_owned(),
                 dns_name: Some("alpha.example.test".to_owned()),
                 nickname: None,
@@ -306,6 +313,7 @@ mod resolution_tests {
             },
             Device {
                 id: "node-two".to_owned(),
+                machine_name: "beta".to_owned(),
                 hostname: "beta".to_owned(),
                 dns_name: Some("beta.example.test".to_owned()),
                 nickname: None,

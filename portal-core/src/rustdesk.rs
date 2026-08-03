@@ -547,6 +547,7 @@ mod tests {
     fn device(preferred_ip: IpAddr, online: bool) -> Device {
         Device {
             id: "node-test".to_owned(),
+            machine_name: "test-host".to_owned(),
             hostname: "test-host".to_owned(),
             dns_name: Some("test-host.example.test".to_owned()),
             nickname: Some("test device".to_owned()),

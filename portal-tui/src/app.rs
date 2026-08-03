@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use portal_core::{Device, Snapshot, Theme};
+use portal_core::{Device, LocalDevice, Snapshot, Theme};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::widgets::TableState;
 
@@ -69,6 +69,7 @@ pub(crate) struct StatusMessage {
 
 #[derive(Debug)]
 pub(crate) struct App {
+    pub(crate) local_device: Option<LocalDevice>,
     pub(crate) devices: Vec<Device>,
     pub(crate) table_state: TableState,
     pub(crate) sort_mode: SortMode,
@@ -96,6 +97,7 @@ impl App {
             "Configured"
         };
         Self {
+            local_device: None,
             devices: Vec::new(),
             table_state: TableState::default(),
             sort_mode: SortMode::Recent,
@@ -247,6 +249,7 @@ impl App {
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
         let old_index = self.table_state.selected();
         let selected_id = self.selected_device().map(|device| device.id.clone());
+        self.local_device = snapshot.local_device;
         self.devices = snapshot.devices;
         sort_devices(&mut self.devices, self.sort_mode);
         self.restore_selection(selected_id.as_deref(), old_index);
@@ -636,6 +639,7 @@ mod tests {
 
     fn snapshot(devices: Vec<Device>) -> Snapshot {
         Snapshot {
+            local_device: None,
             devices,
             warnings: Vec::new(),
         }
@@ -651,6 +655,7 @@ mod tests {
     fn device(id: &str, name: &str, online: bool, last_connected_at: Option<u64>) -> Device {
         Device {
             id: id.to_owned(),
+            machine_name: name.to_owned(),
             hostname: name.to_owned(),
             dns_name: Some(format!("{name}.example.test")),
             nickname: None,

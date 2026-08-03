@@ -4,8 +4,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
-    Wrap,
+    Block, BorderType, Cell, Clear, List, ListItem, ListState, Padding, Paragraph, Row, Table,
+    TableState, Wrap,
 };
 
 use crate::app::{
@@ -129,9 +129,9 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme, n
         render_details(frame, columns[2], app.selected_device(), theme, now);
     } else if area.width < 100 && area.height >= 18 {
         let rows = Layout::vertical([
-            Constraint::Percentage(60),
+            Constraint::Percentage(55),
             Constraint::Length(1),
-            Constraint::Percentage(40),
+            Constraint::Percentage(45),
         ])
         .split(area);
         render_device_table(
@@ -296,7 +296,8 @@ fn render_details(
             })),
         )),
         Line::from(""),
-        detail_line("hostname", &device.hostname, theme),
+        detail_line("machine", &device.machine_name, theme),
+        detail_line("host OS", &device.hostname, theme),
     ];
     if let Some(dns_name) = &device.dns_name {
         lines.push(detail_line("dns", dns_name, theme));
@@ -330,6 +331,19 @@ fn render_details(
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let local = app
+        .local_device
+        .as_ref()
+        .map(|device| format!("{} · {}", device.machine_name, device.preferred_ip));
+    let local_width = local.as_ref().map_or(0, |value| {
+        value.chars().count().min(usize::from(u16::MAX)) as u16
+    });
+    let columns = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(local_width.min(area.width)),
+    ])
+    .split(area);
+
     if let Some(message) = &app.message {
         let (prefix, foreground) = match message.level {
             MessageLevel::Info => ("", theme.signal),
@@ -342,33 +356,43 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
                 Span::styled(&message.text, Style::default().fg(color(foreground))),
             ]))
             .style(Style::default().bg(color(theme.background))),
-            area,
+            columns[0],
         );
-        return;
+    } else {
+        let accent = Style::default().fg(color(theme.accent));
+        let muted = Style::default().fg(color(theme.muted));
+        let line = Line::from(vec![
+            Span::styled("↑/k ↓/j", accent),
+            Span::styled(" move  ", muted),
+            Span::styled("enter", accent),
+            Span::styled(" connect  ", muted),
+            Span::styled("s", accent),
+            Span::styled(" share  ", muted),
+            Span::styled("tab", accent),
+            Span::styled(format!(" sort: {}  ", app.sort_mode.label()), muted),
+            Span::styled("r", accent),
+            Span::styled(" refresh  ", muted),
+            Span::styled("t", accent),
+            Span::styled(" theme  ", muted),
+            Span::styled("q", accent),
+            Span::styled(" quit", muted),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(color(theme.background))),
+            columns[0],
+        );
     }
 
-    let accent = Style::default().fg(color(theme.accent));
-    let muted = Style::default().fg(color(theme.muted));
-    let line = Line::from(vec![
-        Span::styled("↑/k ↓/j", accent),
-        Span::styled(" move  ", muted),
-        Span::styled("enter", accent),
-        Span::styled(" connect  ", muted),
-        Span::styled("s", accent),
-        Span::styled(" share  ", muted),
-        Span::styled("tab", accent),
-        Span::styled(format!(" sort: {}  ", app.sort_mode.label()), muted),
-        Span::styled("r", accent),
-        Span::styled(" refresh  ", muted),
-        Span::styled("t", accent),
-        Span::styled(" theme  ", muted),
-        Span::styled("q", accent),
-        Span::styled(" quit", muted),
-    ]);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(color(theme.background))),
-        area,
-    );
+    if let Some(local) = local {
+        frame.render_widget(
+            Paragraph::new(local).alignment(Alignment::Right).style(
+                Style::default()
+                    .fg(color(theme.muted))
+                    .bg(color(theme.background)),
+            ),
+            columns[1],
+        );
+    }
 }
 
 fn render_theme_picker(frame: &mut Frame<'_>, app: &App, theme: Theme) {
@@ -431,6 +455,7 @@ fn panel<'a>(title: &'a str, theme: Theme) -> Block<'a> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .title(title)
+        .padding(Padding::uniform(1))
         .border_style(Style::default().fg(color(theme.muted)))
         .style(base_style(theme))
 }
@@ -492,7 +517,7 @@ const fn color(value: ThemeColor) -> Color {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use portal_core::{Device, Snapshot, Theme};
+    use portal_core::{Device, LocalDevice, Snapshot, Theme};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -539,7 +564,7 @@ mod tests {
         let mut app = populated_app();
         let stacked = render_text(&mut app, 80, 24);
         assert!(stacked.contains("details"));
-        assert!(stacked.contains("hostname"));
+        assert!(stacked.contains("host OS"));
 
         let list_only = render_text(&mut app, 60, 16);
         assert!(list_only.contains("devices"));
@@ -609,6 +634,41 @@ mod tests {
     }
 
     #[test]
+    fn footer_shows_local_tailscale_identity_on_the_right() {
+        let mut app = populated_app();
+        app.local_device = Some(LocalDevice {
+            machine_name: "local-machine".to_owned(),
+            preferred_ip: IpAddr::V4(Ipv4Addr::new(100, 100, 0, 9)),
+        });
+        let text = render_text(&mut app, 120, 30);
+
+        assert!(
+            text.lines()
+                .last()
+                .unwrap()
+                .ends_with("local-machine · 100.100.0.9")
+        );
+    }
+
+    #[test]
+    fn panels_have_uniform_inner_padding() {
+        let mut app = populated_app();
+        let text = render_text(&mut app, 120, 30);
+        let lines: Vec<&str> = text.lines().collect();
+        let device_row = text
+            .lines()
+            .find(|line| line.contains("studio") && line.contains('●'))
+            .unwrap();
+
+        assert!(!lines[3].contains("NAME"));
+        assert!(lines[4].contains("NAME"));
+        assert_eq!(
+            device_row.chars().position(|character| character == '●'),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn theme_picker_matches_the_previewed_theme() {
         let mut app = populated_app();
         app.open_theme_picker();
@@ -675,6 +735,7 @@ mod tests {
 
     fn snapshot(devices: Vec<Device>) -> Snapshot {
         Snapshot {
+            local_device: None,
             devices,
             warnings: Vec::new(),
         }
@@ -683,6 +744,7 @@ mod tests {
     fn device(id: &str, hostname: &str, online: bool, last_connected_at: Option<u64>) -> Device {
         Device {
             id: id.to_owned(),
+            machine_name: hostname.to_owned(),
             hostname: hostname.to_owned(),
             dns_name: Some(format!("{hostname}.example.test")),
             nickname: None,

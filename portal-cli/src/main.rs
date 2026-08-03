@@ -411,6 +411,7 @@ mod tests {
     fn device(hostname: &str, online: bool) -> Device {
         Device {
             id: format!("node-{hostname}"),
+            machine_name: hostname.to_owned(),
             hostname: hostname.to_owned(),
             dns_name: Some(format!("{hostname}.example.test")),
             nickname: None,

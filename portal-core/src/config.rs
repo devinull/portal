@@ -109,7 +109,10 @@ pub(crate) fn merge_metadata(devices: &mut [Device], config: &Config) {
         let Some(metadata) = config
             .devices
             .iter()
-            .find(|(hostname, _)| hostname.eq_ignore_ascii_case(&device.hostname))
+            .find(|(hostname, _)| {
+                hostname.eq_ignore_ascii_case(&device.machine_name)
+                    || hostname.eq_ignore_ascii_case(&device.hostname)
+            })
             .map(|(_, metadata)| metadata)
         else {
             continue;
@@ -310,6 +313,7 @@ mod tests {
     fn device(id: &str, hostname: &str) -> Device {
         Device {
             id: id.to_owned(),
+            machine_name: hostname.to_owned(),
             hostname: hostname.to_owned(),
             dns_name: None,
             nickname: None,

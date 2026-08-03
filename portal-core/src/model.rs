@@ -7,6 +7,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Device {
     pub id: String,
+    pub machine_name: String,
     pub hostname: String,
     pub dns_name: Option<String>,
     pub nickname: Option<String>,
@@ -23,8 +24,14 @@ pub struct Device {
 impl Device {
     #[must_use]
     pub fn display_name(&self) -> &str {
-        self.nickname.as_deref().unwrap_or(&self.hostname)
+        self.nickname.as_deref().unwrap_or(&self.machine_name)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalDevice {
+    pub machine_name: String,
+    pub preferred_ip: IpAddr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

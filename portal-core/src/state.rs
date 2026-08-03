@@ -212,6 +212,7 @@ mod tests {
     fn device(id: &str, hostname: &str) -> Device {
         Device {
             id: id.to_owned(),
+            machine_name: hostname.to_owned(),
             hostname: hostname.to_owned(),
             dns_name: None,
             nickname: None,

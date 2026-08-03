@@ -6,7 +6,7 @@ use std::process::Command;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::model::Device;
+use crate::model::{Device, LocalDevice};
 use crate::platform::{ExecutableNotFound, resolve_executable};
 
 #[derive(Debug, Error)]
@@ -67,8 +67,21 @@ struct Peer {
     online: bool,
 }
 
+#[derive(Debug)]
+pub struct TailscaleSnapshot {
+    pub local_device: Option<LocalDevice>,
+    pub devices: Vec<Device>,
+}
+
 /// Runs one on-demand Tailscale discovery without a shell.
 pub fn discover(tailscale_override: Option<&Path>) -> Result<Vec<Device>, DiscoveryError> {
+    discover_snapshot(tailscale_override).map(|snapshot| snapshot.devices)
+}
+
+/// Runs one on-demand Tailscale discovery including the local device identity.
+pub fn discover_snapshot(
+    tailscale_override: Option<&Path>,
+) -> Result<TailscaleSnapshot, DiscoveryError> {
     let executable = resolve_executable("tailscale", tailscale_override)?;
     let output = Command::new(&executable)
         .args(["status", "--json"])
@@ -91,13 +104,19 @@ pub fn discover(tailscale_override: Option<&Path>) -> Result<Vec<Device>, Discov
     }
 
     let stdout = String::from_utf8(output.stdout).map_err(|_| DiscoveryError::InvalidUtf8)?;
-    parse_status(&stdout).map_err(DiscoveryError::from)
+    parse_snapshot(&stdout).map_err(DiscoveryError::from)
 }
 
 /// Parses a single `tailscale status --json` response without performing I/O.
 pub fn parse_status(json: &str) -> Result<Vec<Device>, TailscaleParseError> {
+    parse_snapshot(json).map(|snapshot| snapshot.devices)
+}
+
+/// Parses peers and the local Tailscale identity from a single status response.
+pub fn parse_snapshot(json: &str) -> Result<TailscaleSnapshot, TailscaleParseError> {
     let status: Status = serde_json::from_str(json)?;
     let local_id = status.local.as_ref().map(|peer| peer.id.as_str());
+    let local_device = status.local.as_ref().and_then(local_device);
     let mut invalid_count = 0;
     let mut considered_count = 0;
     let mut devices = Vec::new();
@@ -126,8 +145,10 @@ pub fn parse_status(json: &str) -> Result<Vec<Device>, TailscaleParseError> {
             continue;
         };
 
+        let machine_name = machine_name(&peer);
         devices.push(Device {
             id: peer.id,
+            machine_name,
             hostname: peer.hostname,
             dns_name: normalize_dns_name(&peer.dns_name),
             nickname: None,
@@ -152,7 +173,34 @@ pub fn parse_status(json: &str) -> Result<Vec<Device>, TailscaleParseError> {
             .cmp(&right.display_name().to_lowercase())
             .then_with(|| left.hostname.cmp(&right.hostname))
     });
-    Ok(devices)
+    Ok(TailscaleSnapshot {
+        local_device,
+        devices,
+    })
+}
+
+fn local_device(peer: &Peer) -> Option<LocalDevice> {
+    let ips: Vec<IpAddr> = peer
+        .ips
+        .iter()
+        .filter_map(|value| value.parse().ok())
+        .collect();
+    let preferred_ip = ips
+        .iter()
+        .copied()
+        .find(IpAddr::is_ipv4)
+        .or_else(|| ips.first().copied())?;
+    Some(LocalDevice {
+        machine_name: machine_name(peer),
+        preferred_ip,
+    })
+}
+
+fn machine_name(peer: &Peer) -> String {
+    normalize_dns_name(&peer.dns_name)
+        .and_then(|dns_name| dns_name.split('.').next().map(str::to_owned))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| peer.hostname.clone())
 }
 
 fn normalize_dns_name(value: &str) -> Option<String> {
@@ -185,7 +233,7 @@ fn indicates_unhealthy(stderr: &str) -> bool {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use super::{TailscaleParseError, parse_status};
+    use super::{TailscaleParseError, parse_snapshot, parse_status};
 
     const MIXED: &str = include_str!("../tests/fixtures/tailscale-status.json");
     const EMPTY: &str = include_str!("../tests/fixtures/tailscale-empty.json");
@@ -219,6 +267,49 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(100, 100, 0, 12))
         );
         assert_eq!(device.ips.len(), 2);
+    }
+
+    #[test]
+    fn uses_tailscale_machine_name_instead_of_os_hostname() {
+        let devices = parse_status(
+            r#"{
+                "Peer": {
+                    "one": {
+                        "ID":"node-one",
+                        "HostName":"os-hostname",
+                        "DNSName":"portal-machine.example.test.",
+                        "TailscaleIPs":["100.100.0.2"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(devices[0].machine_name, "portal-machine");
+        assert_eq!(devices[0].hostname, "os-hostname");
+        assert_eq!(devices[0].display_name(), "portal-machine");
+    }
+
+    #[test]
+    fn parses_local_machine_name_and_preferred_ip() {
+        let snapshot = parse_snapshot(
+            r#"{
+                "Self": {
+                    "ID":"node-self",
+                    "HostName":"local-os-name",
+                    "DNSName":"local-machine.example.test.",
+                    "TailscaleIPs":["fd7a:115c:a1e0::1", "100.100.0.1"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let local = snapshot.local_device.unwrap();
+
+        assert_eq!(local.machine_name, "local-machine");
+        assert_eq!(
+            local.preferred_ip,
+            IpAddr::V4(Ipv4Addr::new(100, 100, 0, 1))
+        );
     }
 
     #[test]
