@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use portal_core::{Action, Device, Launch, Portal, ProvisionPlan, resolve};
 
 #[derive(Debug, Parser)]
@@ -100,9 +100,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         (None, None) => {
-            let mut command = Cli::command();
-            command.print_help()?;
-            println!("\n\nThe interactive TUI arrives in Stage 2.");
+            if cli.dry_run {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--dry-run requires an action command or device target",
+                )
+                .into());
+            }
+            let portal = Portal::load(cli.config.as_deref())?;
+            portal_tui::run(portal)?;
             return Ok(());
         }
         (Some(_), Some(_)) => unreachable!("Clap prevents a subcommand and shorthand target"),
@@ -244,13 +250,24 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use portal_core::{Device, Launch, ProvisionPlan, ProvisionStep, ServiceState};
 
-    use super::{Cli, Command, render_human, render_json, render_launch, render_provision_plan};
+    use super::{
+        Cli, Command, render_human, render_json, render_launch, render_provision_plan, run,
+    };
 
     #[test]
     fn parses_bare_invocation() {
         let cli = Cli::try_parse_from(["portal"]).unwrap();
         assert!(cli.command.is_none());
         assert!(cli.target.is_none());
+    }
+
+    #[test]
+    fn rejects_bare_dry_run_before_starting_the_tui() {
+        let cli = Cli::try_parse_from(["portal", "--dry-run"]).unwrap();
+
+        let error = run(cli).unwrap_err();
+
+        assert!(error.to_string().contains("requires an action"));
     }
 
     #[test]

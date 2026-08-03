@@ -6,12 +6,14 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::model::Device;
+use crate::theme::Theme;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
     pub executables: Executables,
     pub devices: BTreeMap<String, DeviceMetadata>,
+    pub theme: Theme,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -145,6 +147,7 @@ mod tests {
         assert!(config.devices.is_empty());
         assert!(config.executables.tailscale.is_none());
         assert!(config.executables.rustdesk.is_none());
+        assert_eq!(config.theme, crate::Theme::default());
     }
 
     #[test]
@@ -154,6 +157,7 @@ mod tests {
         assert!(config.devices.is_empty());
         assert!(config.executables.tailscale.is_none());
         assert!(config.executables.rustdesk.is_none());
+        assert_eq!(config.theme, crate::Theme::default());
     }
 
     #[test]
@@ -198,6 +202,43 @@ mod tests {
         let error = load_from("[devices.host]\npassword = \"secret\"");
 
         assert!(matches!(error, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn loads_full_and_partial_themes() {
+        let full = load_ok(
+            r##"
+                [theme]
+                background = "#010203"
+                foreground = "#111213"
+                accent = "#212223"
+                muted = "#313233"
+                signal = "#414243"
+            "##,
+        );
+        assert_eq!(full.theme.background.red, 0x01);
+        assert_eq!(full.theme.foreground.green, 0x12);
+        assert_eq!(full.theme.accent.blue, 0x23);
+        assert_eq!(full.theme.muted.red, 0x31);
+        assert_eq!(full.theme.signal.blue, 0x43);
+
+        let partial = load_ok("[theme]\naccent = \"#010203\"");
+        assert_eq!(partial.theme.accent.red, 0x01);
+        assert_eq!(partial.theme.background, crate::Theme::default().background);
+        assert_eq!(partial.theme.signal, crate::Theme::default().signal);
+    }
+
+    #[test]
+    fn rejects_invalid_or_unknown_theme_values() {
+        for source in [
+            "[theme]\naccent = \"7AA2F7\"",
+            "[theme]\naccent = \"#ABC\"",
+            "[theme]\naccent = \"#7AA2F7FF\"",
+            "[theme]\naccent = \"#ZZZZZZ\"",
+            "[theme]\nselection = \"#7AA2F7\"",
+        ] {
+            assert!(matches!(load_from(source), ConfigError::Parse { .. }));
+        }
     }
 
     #[test]

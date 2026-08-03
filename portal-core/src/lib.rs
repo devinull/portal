@@ -6,6 +6,7 @@ pub mod platform;
 mod rustdesk;
 mod state;
 pub mod tailscale;
+mod theme;
 
 use std::path::{Path, PathBuf};
 use std::{collections::HashSet, net::IpAddr};
@@ -21,6 +22,7 @@ pub use rustdesk::{
 };
 use state::{StateError, load_state, merge_state};
 pub use tailscale::{DiscoveryError, TailscaleParseError, discover, parse_status};
+pub use theme::{Theme, ThemeColor, ThemeColorParseError};
 
 #[derive(Debug, Error)]
 pub enum PortalError {
@@ -140,6 +142,11 @@ impl Portal {
 
     pub fn snapshot(&self) -> Result<Vec<Device>, PortalError> {
         Ok(self.snapshot_with_warnings()?.devices)
+    }
+
+    #[must_use]
+    pub fn theme(&self) -> Theme {
+        self.config.theme
     }
 
     pub fn snapshot_with_warnings(&self) -> Result<Snapshot, PortalError> {

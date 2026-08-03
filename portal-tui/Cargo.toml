@@ -1,0 +1,9 @@
+[package]
+name = "portal-tui"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+portal-core = { path = "../portal-core" }
+ratatui.workspace = true
