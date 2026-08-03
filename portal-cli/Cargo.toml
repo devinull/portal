@@ -1,0 +1,14 @@
+[package]
+name = "portal-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "portal"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+portal-core = { path = "../portal-core" }
+serde_json.workspace = true

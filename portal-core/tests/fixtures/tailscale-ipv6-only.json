@@ -1,0 +1,17 @@
+{
+  "Self": {
+    "ID": "node-self",
+    "HostName": "controller",
+    "TailscaleIPs": ["100.100.0.1"]
+  },
+  "Peer": {
+    "peer-ipv6": {
+      "ID": "node-ipv6",
+      "HostName": "ipv6-host",
+      "DNSName": "ipv6.example.test.",
+      "OS": "linux",
+      "TailscaleIPs": ["fd7a:115c:a1e0::2a"],
+      "Online": true
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "Version": "1.99.0",
+  "Self": {
+    "ID": "node-self",
+    "HostName": "controller",
+    "DNSName": "controller.example.test.",
+    "OS": "windows",
+    "TailscaleIPs": ["100.100.0.1"],
+    "Online": true
+  },
+  "Peer": {
+    "peer-zeta": {
+      "ID": "node-zeta",
+      "HostName": "zeta-workstation",
+      "DNSName": "zeta.example.test.",
+      "OS": "windows",
+      "TailscaleIPs": ["fd7a:115c:a1e0::12", "100.100.0.12"],
+      "Online": true,
+      "UnknownFutureField": {"safe": true}
+    },
+    "peer-alpha": {
+      "ID": "node-alpha",
+      "HostName": "alpha-laptop",
+      "DNSName": "alpha.example.test.",
+      "OS": "linux",
+      "TailscaleIPs": ["not-an-ip", "100.100.0.20"],
+      "Online": false
+    },
+    "peer-broken": {
+      "ID": "node-broken",
+      "HostName": "broken-peer",
+      "DNSName": "broken.example.test.",
+      "OS": "macOS",
+      "TailscaleIPs": ["invalid"],
+      "Online": false
+    },
+    "peer-phone": {
+      "ID": "node-phone",
+      "HostName": "mobile-phone",
+      "DNSName": "mobile-phone.example.test.",
+      "OS": "iOS",
+      "TailscaleIPs": ["100.100.0.30"],
+      "Online": true
+    },
+    "peer-tablet": {
+      "ID": "node-tablet",
+      "HostName": "mobile-tablet",
+      "DNSName": "mobile-tablet.example.test.",
+      "OS": "android",
+      "TailscaleIPs": ["100.100.0.31"],
+      "Online": true
+    }
+  },
+  "ExtraTopLevelField": "ignored"
+}
