@@ -352,12 +352,6 @@ fn execute_launch_with(
     spawn: impl FnOnce(&Launch) -> std::io::Result<()>,
 ) -> Result<LaunchOutcome, RustDeskError> {
     let mut warnings = Vec::new();
-    if !device.online {
-        warnings.push(format!(
-            "{} is reported offline; attempting RustDesk launch anyway",
-            device.display_name()
-        ));
-    }
     spawn(launch).map_err(|source| RustDeskError::Start {
         path: launch.program.clone(),
         source,
@@ -487,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_spawn_records_state_and_warns_for_offline_device() {
+    fn successful_spawn_records_state_without_coordination_hint_warning() {
         let temp = tempdir().unwrap();
         let state_path = temp.path().join("state.json");
         let device = device(IpAddr::V4(Ipv4Addr::LOCALHOST), false);
@@ -496,8 +490,7 @@ mod tests {
         let outcome = execute_launch_with(&launch, &state_path, &device, |_| Ok(())).unwrap();
         let (state, warning) = load_state(&state_path);
 
-        assert_eq!(outcome.warnings.len(), 1);
-        assert!(outcome.warnings[0].contains("offline"));
+        assert!(outcome.warnings.is_empty());
         assert!(warning.is_none());
         assert!(state.last_connected.contains_key(&device.id));
     }

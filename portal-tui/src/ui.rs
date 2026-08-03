@@ -4,12 +4,12 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Clear, List, ListItem, ListState, Padding, Paragraph, Row, Table,
-    TableState, Wrap,
+    Block, BorderType, Cell, Clear, List, ListItem, ListState, Padding, Paragraph, Row, Table, Wrap,
 };
 
 use crate::app::{
-    App, DiscoveryHealth, MessageLevel, MessageSource, ThemeOption, format_last_connected,
+    App, Availability, AvailabilityState, DiscoveryHealth, MessageLevel, MessageSource,
+    ThemeOption, format_last_connected,
 };
 
 const MINIMUM_WIDTH: u16 = 48;
@@ -59,8 +59,12 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let online = app.devices.iter().filter(|device| device.online).count();
-    let summary = format!("{online} online · {} devices", app.devices.len());
+    let reachable = app
+        .devices
+        .iter()
+        .filter(|device| app.availability_state(device) == AvailabilityState::Reachable)
+        .count();
+    let summary = format!("{reachable} reachable · {} devices", app.devices.len());
     let summary_width = summary
         .chars()
         .count()
@@ -117,16 +121,16 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme, n
             Constraint::Percentage(40),
         ])
         .split(area);
-        render_device_table(
+        render_device_table(frame, columns[0], app, discovery_failed, false, theme);
+        render_details(
             frame,
-            columns[0],
-            &app.devices,
-            &mut app.table_state,
-            app.initial_load_complete,
-            discovery_failed,
+            columns[2],
+            app.selected_device(),
+            app.selected_device()
+                .and_then(|device| app.availability(device)),
             theme,
+            now,
         );
-        render_details(frame, columns[2], app.selected_device(), theme, now);
     } else if area.width < 100 && area.height >= 18 {
         let rows = Layout::vertical([
             Constraint::Percentage(55),
@@ -134,45 +138,36 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme, n
             Constraint::Percentage(45),
         ])
         .split(area);
-        render_device_table(
+        render_device_table(frame, rows[0], app, discovery_failed, false, theme);
+        render_details(
             frame,
-            rows[0],
-            &app.devices,
-            &mut app.table_state,
-            app.initial_load_complete,
-            discovery_failed,
+            rows[2],
+            app.selected_device(),
+            app.selected_device()
+                .and_then(|device| app.availability(device)),
             theme,
+            now,
         );
-        render_details(frame, rows[2], app.selected_device(), theme, now);
     } else {
-        render_device_table(
-            frame,
-            area,
-            &app.devices,
-            &mut app.table_state,
-            app.initial_load_complete,
-            discovery_failed,
-            theme,
-        );
+        render_device_table(frame, area, app, discovery_failed, true, theme);
     }
 }
 
 fn render_device_table(
     frame: &mut Frame<'_>,
     area: Rect,
-    devices: &[Device],
-    table_state: &mut TableState,
-    initial_load_complete: bool,
+    app: &mut App,
     discovery_failed: bool,
+    show_latency: bool,
     theme: Theme,
 ) {
     let block = panel(" devices ", theme);
-    if devices.is_empty() {
+    if app.devices.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let message = if discovery_failed {
             "Discovery failed — press r to retry"
-        } else if initial_load_complete {
+        } else if app.initial_load_complete {
             "No reachable desktop peers"
         } else {
             "Discovering devices..."
@@ -188,23 +183,30 @@ fn render_device_table(
         return;
     }
 
-    let column_mode = table_column_mode(area.width);
-    let selected_index = table_state.selected();
+    let column_mode = if show_latency {
+        list_only_column_mode(area.width)
+    } else {
+        table_column_mode(area.width)
+    };
+    let selected_index = app.table_state.selected();
     let selected_style = Style::default()
         .fg(color(theme.background))
         .bg(color(theme.accent))
         .add_modifier(Modifier::BOLD);
-    let rows = devices.iter().enumerate().map(|(index, device)| {
+    let rows = app.devices.iter().enumerate().map(|(index, device)| {
         let selected = selected_index == Some(index);
-        let mut status_style = Style::default().fg(color(if device.online {
-            theme.signal
-        } else {
-            theme.muted
-        }));
+        let device_availability = app.availability.get(&device.id);
+        let state = device_availability.map_or(AvailabilityState::Unknown, |value| value.state);
+        let reachable = state == AvailabilityState::Reachable;
+        let mut status_style =
+            Style::default().fg(color(if reachable { theme.signal } else { theme.muted }));
         if selected {
             status_style = status_style.bg(color(theme.accent));
         }
-        let mut cells = vec![Cell::from(Span::styled("●", status_style))];
+        let mut cells = vec![Cell::from(Span::styled(
+            if reachable { "●" } else { "○" },
+            status_style,
+        ))];
         cells.push(Cell::from(device.display_name().to_owned()));
         if column_mode != ColumnMode::Narrow {
             cells.push(Cell::from(device.os.clone()));
@@ -212,13 +214,18 @@ fn render_device_table(
         if column_mode == ColumnMode::Wide {
             cells.push(Cell::from(device.preferred_ip.to_string()));
         }
+        if show_latency {
+            cells.push(Cell::from(format_latency(
+                device_availability.and_then(|value| value.latency),
+            )));
+        }
         Row::new(cells).style(if selected {
             selected_style
         } else {
             base_style(theme)
         })
     });
-    let (headings, widths): (Vec<&str>, Vec<Constraint>) = match column_mode {
+    let (mut headings, mut widths): (Vec<&str>, Vec<Constraint>) = match column_mode {
         ColumnMode::Wide => (
             vec!["", "NAME", "OS", "ADDRESS"],
             vec![
@@ -241,6 +248,10 @@ fn render_device_table(
             vec![Constraint::Length(2), Constraint::Min(12)],
         ),
     };
+    if show_latency {
+        headings.push("LATENCY");
+        widths.push(Constraint::Length(9));
+    }
     let header = Row::new(headings)
         .style(
             Style::default()
@@ -253,13 +264,14 @@ fn render_device_table(
         .block(block)
         .column_spacing(1)
         .style(base_style(theme));
-    frame.render_stateful_widget(table, area, table_state);
+    frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
 fn render_details(
     frame: &mut Frame<'_>,
     area: Rect,
     device: Option<&Device>,
+    availability: Option<&Availability>,
     theme: Theme,
     now: u64,
 ) {
@@ -280,16 +292,40 @@ fn render_details(
         return;
     };
 
-    let mut lines = vec![
+    let state = availability.map_or(AvailabilityState::Unknown, |value| value.state);
+    let latency = format_latency(availability.and_then(|value| value.latency));
+    let inner = block.inner(area);
+    let name = device.display_name();
+    let name_width = name.chars().count();
+    let latency_width = latency.chars().count();
+    let first_line = if name_width + latency_width < usize::from(inner.width) {
+        Line::from(vec![
+            Span::styled(
+                name.to_owned(),
+                Style::default()
+                    .fg(color(theme.foreground))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(usize::from(inner.width) - name_width - latency_width)),
+            Span::styled(latency, Style::default().fg(color(theme.muted))),
+        ])
+    } else {
         Line::from(Span::styled(
-            device.display_name().to_owned(),
+            name.to_owned(),
             Style::default()
                 .fg(color(theme.foreground))
                 .add_modifier(Modifier::BOLD),
-        )),
+        ))
+    };
+    let mut lines = vec![
+        first_line,
         Line::from(Span::styled(
-            if device.online { "online" } else { "offline" },
-            Style::default().fg(color(if device.online {
+            match state {
+                AvailabilityState::Reachable => "reachable",
+                AvailabilityState::Unknown => "checking",
+                AvailabilityState::Unavailable => "unavailable",
+            },
+            Style::default().fg(color(if state == AvailabilityState::Reachable {
                 theme.signal
             } else {
                 theme.muted
@@ -321,12 +357,12 @@ fn render_details(
         theme,
     ));
 
+    frame.render_widget(block, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(block)
             .wrap(Wrap { trim: true })
             .style(base_style(theme)),
-        area,
+        inner,
     );
 }
 
@@ -503,6 +539,29 @@ const fn table_column_mode(width: u16) -> ColumnMode {
     }
 }
 
+const fn list_only_column_mode(width: u16) -> ColumnMode {
+    if width >= 72 {
+        ColumnMode::Wide
+    } else if width >= 54 {
+        ColumnMode::Medium
+    } else {
+        ColumnMode::Narrow
+    }
+}
+
+pub(crate) fn format_latency(latency: Option<std::time::Duration>) -> String {
+    let Some(latency) = latency else {
+        return "—".to_owned();
+    };
+    if latency < std::time::Duration::from_millis(1) {
+        "<1 ms".to_owned()
+    } else if latency < std::time::Duration::from_secs(1) {
+        format!("{} ms", (latency.as_secs_f64() * 1_000.0).round() as u64)
+    } else {
+        format!("{:.1} s", latency.as_secs_f64())
+    }
+}
+
 fn base_style(theme: Theme) -> Style {
     Style::default()
         .fg(color(theme.foreground))
@@ -516,15 +575,16 @@ const fn color(value: ThemeColor) -> Color {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     use portal_core::{Device, LocalDevice, Snapshot, Theme};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use crate::app::{App, MessageLevel};
+    use crate::app::{App, AvailabilityState, MessageLevel};
 
-    use super::{color, render};
+    use super::{color, format_latency, render};
 
     #[test]
     fn wide_layout_contains_table_details_and_footer() {
@@ -539,6 +599,9 @@ mod tests {
         assert!(text.contains("100.100.0.42"));
         assert!(text.contains("desktop · primary"));
         assert!(text.contains("Sanitized workstation"));
+        assert!(text.contains("24 ms"));
+        assert!(text.contains("reachable"));
+        assert!(!text.contains("LATENCY"));
         assert!(text.contains("sort: recent"));
         assert!(text.contains("t theme"));
         assert!(!text.contains("refreshing"));
@@ -548,15 +611,33 @@ mod tests {
     fn header_uses_a_stable_discovery_health_dot() {
         let mut pending = App::default();
         let pending_text = render_text(&mut pending, 80, 24);
-        assert!(pending_text.lines().next().unwrap().contains("○ 0 online"));
+        assert!(
+            pending_text
+                .lines()
+                .next()
+                .unwrap()
+                .contains("○ 0 reachable")
+        );
 
         pending.finish_refresh(Ok(snapshot(Vec::new())));
         let healthy_text = render_text(&mut pending, 80, 24);
-        assert!(healthy_text.lines().next().unwrap().contains("● 0 online"));
+        assert!(
+            healthy_text
+                .lines()
+                .next()
+                .unwrap()
+                .contains("● 0 reachable")
+        );
 
         pending.finish_refresh(Err("connection lost".to_owned()));
         let failed_text = render_text(&mut pending, 80, 24);
-        assert!(failed_text.lines().next().unwrap().contains("○ 0 online"));
+        assert!(
+            failed_text
+                .lines()
+                .next()
+                .unwrap()
+                .contains("○ 0 reachable")
+        );
     }
 
     #[test]
@@ -565,10 +646,42 @@ mod tests {
         let stacked = render_text(&mut app, 80, 24);
         assert!(stacked.contains("details"));
         assert!(stacked.contains("host OS"));
+        assert!(stacked.contains("24 ms"));
+        assert!(!stacked.contains("LATENCY"));
 
         let list_only = render_text(&mut app, 60, 16);
         assert!(list_only.contains("devices"));
         assert!(!list_only.contains("details"));
+        assert!(list_only.contains("LATENCY"));
+        assert!(list_only.contains("24 ms"));
+    }
+
+    #[test]
+    fn list_only_latency_columns_follow_exact_width_thresholds() {
+        let mut app = populated_app();
+        let wide = render_text(&mut app, 72, 16);
+        assert!(wide.contains("OS"));
+        assert!(wide.contains("ADDRESS"));
+        assert!(wide.contains("LATENCY"));
+
+        let medium = render_text(&mut app, 54, 16);
+        assert!(medium.contains("OS"));
+        assert!(!medium.contains("ADDRESS"));
+        assert!(medium.contains("LATENCY"));
+
+        let narrow = render_text(&mut app, 48, 16);
+        assert!(!narrow.contains(" OS "));
+        assert!(!narrow.contains("ADDRESS"));
+        assert!(narrow.contains("LATENCY"));
+    }
+
+    #[test]
+    fn latency_formatter_uses_operational_precision() {
+        assert_eq!(format_latency(None), "—");
+        assert_eq!(format_latency(Some(Duration::from_nanos(800))), "<1 ms");
+        assert_eq!(format_latency(Some(Duration::from_micros(24_499))), "24 ms");
+        assert_eq!(format_latency(Some(Duration::from_micros(24_500))), "25 ms");
+        assert_eq!(format_latency(Some(Duration::from_secs_f64(1.24))), "1.2 s");
     }
 
     #[test]
@@ -598,29 +711,47 @@ mod tests {
 
     #[test]
     fn status_dots_and_selected_row_use_theme_colors() {
-        let mut app = populated_app();
-        let theme = Theme::default();
-        let backend = TestBackend::new(120, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| render(frame, &mut app, theme, 200))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
+        for theme in [Theme::portal(), Theme::hacker(), Theme::cyber_cyan()] {
+            let mut app = populated_app();
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &mut app, theme, 200))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
 
-        let dot_colors: Vec<Color> = buffer
-            .content
-            .iter()
-            .filter(|cell| cell.symbol() == "●")
-            .map(|cell| cell.fg)
-            .collect();
-        assert!(dot_colors.contains(&color(theme.signal)));
-        assert!(dot_colors.contains(&color(theme.muted)));
-        assert!(
-            buffer
+            let filled_dot_colors: Vec<Color> = buffer
                 .content
                 .iter()
-                .any(|cell| cell.bg == color(theme.accent))
-        );
+                .filter(|cell| cell.symbol() == "●")
+                .map(|cell| cell.fg)
+                .collect();
+            let empty_dot_colors: Vec<Color> = buffer
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "○")
+                .map(|cell| cell.fg)
+                .collect();
+            assert!(filled_dot_colors.contains(&color(theme.signal)));
+            assert!(empty_dot_colors.contains(&color(theme.muted)));
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|cell| cell.bg == color(theme.accent))
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_details_omit_latency_instead_of_truncating_the_name_for_it() {
+        let mut app = populated_app();
+        app.devices[0].nickname =
+            Some("a-device-name-that-nearly-fills-the-details-panel".to_owned());
+        let text = render_text(&mut app, 48, 24);
+
+        assert!(text.contains("a-device-name"));
+        assert!(!text.contains("24 ms"));
     }
 
     #[test]
@@ -730,6 +861,11 @@ mod tests {
             device("node-laptop", "laptop", true, None),
             device("node-server", "server", false, None),
         ])));
+        let studio = app.availability.get_mut("node-studio").unwrap();
+        studio.state = AvailabilityState::Reachable;
+        studio.latency = Some(Duration::from_millis(24));
+        app.availability.get_mut("node-laptop").unwrap().state = AvailabilityState::Reachable;
+        app.availability.get_mut("node-server").unwrap().state = AvailabilityState::Unavailable;
         app
     }
 

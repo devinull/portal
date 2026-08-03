@@ -10,14 +10,25 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use app::{
-    App, InputCommand, MessageLevel, ThemePickerCommand, input_command, theme_picker_command,
+    App, AvailabilityState, InputCommand, MessageLevel, ProbeTarget, ThemePickerCommand,
+    input_command, theme_picker_command,
 };
-use portal_core::{Action, Portal, Snapshot};
+use portal_core::{Action, Device, Portal, ProbeMeasurement, Snapshot};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const EVENT_POLL_MAX: Duration = Duration::from_millis(100);
+
+struct ProbeRequest {
+    target: ProbeTarget,
+    device: Device,
+}
+
+struct ProbeResponse {
+    target: ProbeTarget,
+    result: Result<ProbeMeasurement, String>,
+}
 
 /// Runs Portal's interactive terminal interface.
 pub fn run(portal: Portal) -> io::Result<()> {
@@ -26,7 +37,7 @@ pub fn run(portal: Portal) -> io::Result<()> {
     let (request_tx, request_rx) = mpsc::sync_channel(1);
     let (response_tx, response_rx) = mpsc::channel();
     let worker_portal = Arc::clone(&portal);
-    let worker = thread::Builder::new()
+    let discovery_worker = thread::Builder::new()
         .name("portal-discovery".to_owned())
         .spawn(move || {
             while request_rx.recv().is_ok() {
@@ -39,13 +50,46 @@ pub fn run(portal: Portal) -> io::Result<()> {
             }
         })?;
 
+    let (probe_request_tx, probe_request_rx) = mpsc::sync_channel::<ProbeRequest>(1);
+    let (probe_response_tx, probe_response_rx) = mpsc::channel::<ProbeResponse>();
+    let probe_portal = Arc::clone(&portal);
+    let probe_worker = thread::Builder::new()
+        .name("portal-probe".to_owned())
+        .spawn(move || {
+            while let Ok(request) = probe_request_rx.recv() {
+                let result = probe_portal
+                    .probe(&request.device)
+                    .map_err(|error| error.to_string());
+                if probe_response_tx
+                    .send(ProbeResponse {
+                        target: request.target,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })?;
+
     let mut app = App::new(configured_theme);
     request_refresh(&mut app, &request_tx);
-    let result =
-        ratatui::run(|terminal| run_loop(terminal, &portal, &request_tx, &response_rx, &mut app));
+    let result = ratatui::run(|terminal| {
+        run_loop(
+            terminal,
+            &portal,
+            &request_tx,
+            &response_rx,
+            &probe_request_tx,
+            &probe_response_rx,
+            &mut app,
+        )
+    });
 
     drop(request_tx);
-    let _ = worker.join();
+    drop(probe_request_tx);
+    let _ = discovery_worker.join();
+    let _ = probe_worker.join();
     result
 }
 
@@ -54,6 +98,8 @@ fn run_loop(
     portal: &Portal,
     request_tx: &SyncSender<()>,
     response_rx: &Receiver<Result<Snapshot, String>>,
+    probe_request_tx: &SyncSender<ProbeRequest>,
+    probe_response_rx: &Receiver<ProbeResponse>,
     app: &mut App,
 ) -> io::Result<()> {
     let mut needs_redraw = true;
@@ -82,11 +128,30 @@ fn run_loop(
             }
         }
 
+        loop {
+            match probe_response_rx.try_recv() {
+                Ok(response) => {
+                    if app.finish_probe(&response.target, response.result, Instant::now()) {
+                        needs_redraw = true;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if app.probe_in_flight.is_some() {
+                        needs_redraw |= app.probe_send_failed();
+                    }
+                    break;
+                }
+            }
+        }
+
         if Instant::now() >= next_refresh {
             request_refresh(app, request_tx);
             next_refresh = Instant::now() + REFRESH_INTERVAL;
             needs_redraw = true;
         }
+
+        needs_redraw |= start_due_probe(app, probe_request_tx, Instant::now());
 
         if needs_redraw {
             let now = unix_seconds();
@@ -119,7 +184,10 @@ fn run_loop(
                             InputCommand::Transfer => {
                                 launch_selected(app, portal, Action::Transfer, request_tx)
                             }
-                            InputCommand::Refresh => request_refresh(app, request_tx),
+                            InputCommand::Refresh => {
+                                app.mark_probes_due(Instant::now());
+                                request_refresh(app, request_tx);
+                            }
                             InputCommand::CycleSort => app.cycle_sort(),
                             InputCommand::OpenThemePicker => app.open_theme_picker(),
                             InputCommand::Quit => return Ok(()),
@@ -133,6 +201,30 @@ fn run_loop(
     }
 }
 
+fn start_due_probe(app: &mut App, request_tx: &SyncSender<ProbeRequest>, now: Instant) -> bool {
+    let Some(target) = app.start_next_probe(now) else {
+        return false;
+    };
+    let Some(device) = app
+        .devices
+        .iter()
+        .find(|device| device.id == target.id && device.preferred_ip == target.ip)
+        .cloned()
+    else {
+        app.cancel_probe_start();
+        return false;
+    };
+
+    match request_tx.try_send(ProbeRequest { target, device }) {
+        Ok(()) => false,
+        Err(TrySendError::Full(_)) => {
+            app.cancel_probe_start();
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => app.probe_send_failed(),
+    }
+}
+
 fn launch_selected(app: &mut App, portal: &Portal, action: Action, request_tx: &SyncSender<()>) {
     let Some(device) = app.selected_device().cloned() else {
         app.set_action_message(MessageLevel::Warning, "No device selected");
@@ -141,7 +233,8 @@ fn launch_selected(app: &mut App, portal: &Portal, action: Action, request_tx: &
 
     match portal.launch_with_warnings(action, &device) {
         Ok(outcome) => {
-            if outcome.warnings.is_empty() {
+            let unavailable = app.availability_state(&device) == AvailabilityState::Unavailable;
+            if outcome.warnings.is_empty() && !unavailable {
                 let operation = match action {
                     Action::Connect => "Opened desktop for",
                     Action::Transfer => "Opened file transfer for",
@@ -151,7 +244,13 @@ fn launch_selected(app: &mut App, portal: &Portal, action: Action, request_tx: &
                     format!("{operation} {}", device.display_name()),
                 );
             } else {
-                app.set_action_message(MessageLevel::Warning, outcome.warnings.join("; "));
+                let mut warnings = Vec::new();
+                if unavailable {
+                    warnings
+                        .push("No recent Tailscale response; opening RustDesk anyway".to_owned());
+                }
+                warnings.extend(outcome.warnings);
+                app.set_action_message(MessageLevel::Warning, warnings.join("; "));
             }
             request_refresh(app, request_tx);
         }

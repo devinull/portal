@@ -1,18 +1,18 @@
 # Portal
 
-Portal is a small cross-platform CLI for discovering devices on a personal
-Tailscale network and opening them directly in RustDesk. Its core library is
-frontend-neutral so the Stage 2 TUI can reuse discovery, resolution, and action
-behavior without duplicating it.
+Portal is a small cross-platform CLI and terminal interface for discovering
+devices on a personal Tailscale network and opening them directly in RustDesk.
 
-Stage 1 includes:
+Portal includes:
 
 - On-demand `tailscale status --json` discovery.
 - Optional TOML nicknames, tags, favorites, and notes.
 - Exact resolution by nickname, hostname, DNS name, IPv4, or IPv6.
 - Human-readable and scriptable JSON device lists.
+- Active background TSMP reachability checks and concise round-trip latency in
+  the TUI.
 - RustDesk remote desktop and file-transfer actions.
-- Stable-ID last-connected state for the future TUI.
+- Stable-ID last-connected state.
 - Preview-first local Windows provisioning.
 
 ## Requirements
@@ -63,7 +63,10 @@ portal --dry-run share rig
 portal --dry-run init rig
 ```
 
-Bare `portal` displays help. The interactive TUI arrives in Stage 2.
+Bare `portal` opens the interactive TUI. The human-readable `portal list` output
+does not claim a live status because it does not delay the command to probe every
+peer. In `portal list --json`, `online` remains the raw Tailscale coordination
+hint for compatibility; it is not Portal's active availability result.
 
 ## Configuration
 
@@ -114,8 +117,10 @@ Portal always passes the preferred Tailscale IP as a separate process argument
 and never invokes RustDesk or Tailscale through a shell. IPv4 is preferred when
 available, with IPv6 as the fallback.
 
-Offline devices produce a warning but remain actionable. Portal returns after
-RustDesk starts rather than waiting for the GUI session to close.
+Devices remain actionable regardless of availability. The TUI gives a
+non-blocking warning only when its active checks have explicitly marked a device
+unavailable. Portal returns after RustDesk starts rather than waiting for the GUI
+session to close.
 
 ## Local provisioning
 
@@ -147,13 +152,15 @@ directory. It contains only stable Tailscale node IDs and Unix timestamps.
 Updates use a temporary file in the same directory followed by atomic rename.
 Invalid state is nonfatal and produces a warning.
 
-Portal never persists credentials, raw Tailscale status output, executable
-paths, or configuration paths in JSON list output or usage state. The tailnet
-is the primary transport trust boundary.
+Portal never persists credentials, raw Tailscale status or ping output,
+executable paths, or configuration paths in JSON list output or usage state.
+Active availability and latency remain in TUI memory only. The tailnet is the
+primary transport trust boundary.
 
 ## Current limitations
 
-- The TUI, GUI, theming, vault, port forwarding, and polling are later stages.
+- The GUI, vault, port forwarding, and on-demand path diagnostics are later
+  stages.
 - Password entry and storage are not implemented.
 - Successful RustDesk authentication depends on target configuration.
 - Windows provisioning assumes RustDesk is already installed.

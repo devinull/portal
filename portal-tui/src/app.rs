@@ -1,8 +1,68 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
-use portal_core::{Device, LocalDevice, Snapshot, Theme};
+use portal_core::{Device, LocalDevice, ProbeMeasurement, Snapshot, Theme};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::widgets::TableState;
+
+pub(crate) const REACHABLE_PROBE_INTERVAL: Duration = Duration::from_secs(15);
+pub(crate) const RETRY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const FAILURES_BEFORE_UNAVAILABLE: u8 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AvailabilityState {
+    Unknown,
+    Reachable,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Availability {
+    pub(crate) state: AvailabilityState,
+    pub(crate) latency: Option<Duration>,
+    consecutive_failures: u8,
+    next_probe_at: Instant,
+    ip: IpAddr,
+}
+
+impl Availability {
+    fn unknown(ip: IpAddr, now: Instant) -> Self {
+        Self {
+            state: AvailabilityState::Unknown,
+            latency: None,
+            consecutive_failures: 0,
+            next_probe_at: now,
+            ip,
+        }
+    }
+
+    fn apply_result(&mut self, result: Result<ProbeMeasurement, String>, now: Instant) {
+        match result {
+            Ok(measurement) => {
+                self.state = AvailabilityState::Reachable;
+                self.latency = measurement.latency;
+                self.consecutive_failures = 0;
+                self.next_probe_at = now + REACHABLE_PROBE_INTERVAL;
+            }
+            Err(_) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                self.latency = None;
+                self.next_probe_at = now + RETRY_PROBE_INTERVAL;
+                if self.consecutive_failures >= FAILURES_BEFORE_UNAVAILABLE {
+                    self.state = AvailabilityState::Unavailable;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProbeTarget {
+    pub(crate) id: String,
+    pub(crate) ip: IpAddr,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SortMode {
@@ -78,7 +138,10 @@ pub(crate) struct App {
     pub(crate) refresh_pending: bool,
     pub(crate) message: Option<StatusMessage>,
     pub(crate) discovery_health: DiscoveryHealth,
+    pub(crate) availability: HashMap<String, Availability>,
+    pub(crate) probe_in_flight: Option<ProbeTarget>,
     pub(crate) themes: Vec<ThemeOption>,
+    probe_worker_disconnected_reported: bool,
     active_theme: usize,
     theme_picker: Option<ThemePicker>,
 }
@@ -106,6 +169,8 @@ impl App {
             refresh_pending: false,
             message: None,
             discovery_health: DiscoveryHealth::Unknown,
+            availability: HashMap::new(),
+            probe_in_flight: None,
             themes: vec![
                 ThemeOption {
                     name: configured_name,
@@ -120,6 +185,7 @@ impl App {
                     theme: Theme::cyber_cyan(),
                 },
             ],
+            probe_worker_disconnected_reported: false,
             active_theme: 0,
             theme_picker: None,
         }
@@ -196,8 +262,119 @@ impl App {
     pub(crate) fn cycle_sort(&mut self) {
         let selected_id = self.selected_device().map(|device| device.id.clone());
         self.sort_mode = self.sort_mode.next();
-        sort_devices(&mut self.devices, self.sort_mode);
+        sort_devices(&mut self.devices, self.sort_mode, &self.availability);
         self.restore_selection(selected_id.as_deref(), self.table_state.selected());
+    }
+
+    pub(crate) fn availability(&self, device: &Device) -> Option<&Availability> {
+        self.availability.get(&device.id)
+    }
+
+    pub(crate) fn availability_state(&self, device: &Device) -> AvailabilityState {
+        self.availability(device)
+            .map_or(AvailabilityState::Unknown, |availability| {
+                availability.state
+            })
+    }
+
+    pub(crate) fn mark_probes_due(&mut self, now: Instant) {
+        for availability in self.availability.values_mut() {
+            availability.next_probe_at = now;
+        }
+    }
+
+    pub(crate) fn start_next_probe(&mut self, now: Instant) -> Option<ProbeTarget> {
+        if self.probe_in_flight.is_some() {
+            return None;
+        }
+
+        let selected_id = self.selected_device().map(|device| device.id.as_str());
+        let selected_due = selected_id.and_then(|id| {
+            self.devices
+                .iter()
+                .find(|device| device.id == id)
+                .and_then(|_device| {
+                    self.availability
+                        .get(id)
+                        .filter(|availability| availability.next_probe_at <= now)
+                        .map(|availability| ProbeTarget {
+                            id: id.to_owned(),
+                            ip: availability.ip,
+                        })
+                })
+        });
+
+        let target = selected_due.or_else(|| {
+            self.devices
+                .iter()
+                .enumerate()
+                .filter_map(|(index, device)| {
+                    let availability = self.availability.get(&device.id)?;
+                    (availability.next_probe_at <= now).then_some((
+                        availability.next_probe_at,
+                        index,
+                        ProbeTarget {
+                            id: device.id.clone(),
+                            ip: availability.ip,
+                        },
+                    ))
+                })
+                .min_by_key(|(next_probe_at, index, _)| (*next_probe_at, *index))
+                .map(|(_, _, target)| target)
+        })?;
+
+        self.probe_in_flight = Some(target.clone());
+        Some(target)
+    }
+
+    pub(crate) fn probe_send_failed(&mut self) -> bool {
+        self.probe_in_flight = None;
+        if !self.probe_worker_disconnected_reported {
+            self.probe_worker_disconnected_reported = true;
+            self.set_action_message(MessageLevel::Warning, "Probe worker stopped");
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn cancel_probe_start(&mut self) {
+        self.probe_in_flight = None;
+    }
+
+    pub(crate) fn finish_probe(
+        &mut self,
+        target: &ProbeTarget,
+        result: Result<ProbeMeasurement, String>,
+        now: Instant,
+    ) -> bool {
+        if self.probe_in_flight.as_ref() != Some(target) {
+            return false;
+        }
+        self.probe_in_flight = None;
+
+        let Some(device) = self
+            .devices
+            .iter()
+            .find(|device| device.id == target.id && device.preferred_ip == target.ip)
+        else {
+            return false;
+        };
+        let Some(availability) = self.availability.get_mut(&device.id) else {
+            return false;
+        };
+        if availability.ip != target.ip {
+            return false;
+        }
+        availability.apply_result(result, now);
+
+        if self.sort_mode == SortMode::Status {
+            let selected_id = self.selected_device().map(|device| device.id.clone());
+            let old_index = self.table_state.selected();
+            sort_devices(&mut self.devices, self.sort_mode, &self.availability);
+            self.restore_selection(selected_id.as_deref(), old_index);
+        }
+        true
     }
 
     pub(crate) fn request_refresh(&mut self) -> bool {
@@ -211,13 +388,17 @@ impl App {
     }
 
     pub(crate) fn finish_refresh(&mut self, result: Result<Snapshot, String>) -> bool {
+        self.finish_refresh_at(result, Instant::now())
+    }
+
+    fn finish_refresh_at(&mut self, result: Result<Snapshot, String>, now: Instant) -> bool {
         self.refresh_in_flight = false;
         self.initial_load_complete = true;
 
         match result {
             Ok(snapshot) => {
                 self.discovery_health = DiscoveryHealth::Healthy;
-                self.apply_snapshot(snapshot);
+                self.apply_snapshot(snapshot, now);
             }
             Err(error) => {
                 self.discovery_health = DiscoveryHealth::Unavailable;
@@ -246,12 +427,13 @@ impl App {
         });
     }
 
-    fn apply_snapshot(&mut self, snapshot: Snapshot) {
+    fn apply_snapshot(&mut self, snapshot: Snapshot, now: Instant) {
         let old_index = self.table_state.selected();
         let selected_id = self.selected_device().map(|device| device.id.clone());
         self.local_device = snapshot.local_device;
         self.devices = snapshot.devices;
-        sort_devices(&mut self.devices, self.sort_mode);
+        self.reconcile_availability(now);
+        sort_devices(&mut self.devices, self.sort_mode, &self.availability);
         self.restore_selection(selected_id.as_deref(), old_index);
 
         if snapshot.warnings.is_empty() {
@@ -268,6 +450,21 @@ impl App {
                 text: snapshot.warnings.join("; "),
                 source: MessageSource::Refresh,
             });
+        }
+    }
+
+    fn reconcile_availability(&mut self, now: Instant) {
+        self.availability
+            .retain(|id, _| self.devices.iter().any(|device| device.id == *id));
+        for device in &self.devices {
+            self.availability
+                .entry(device.id.clone())
+                .and_modify(|availability| {
+                    if availability.ip != device.preferred_ip {
+                        *availability = Availability::unknown(device.preferred_ip, now);
+                    }
+                })
+                .or_insert_with(|| Availability::unknown(device.preferred_ip, now));
         }
     }
 
@@ -355,15 +552,26 @@ pub(crate) fn format_last_connected(timestamp: Option<u64>, now: u64) -> String 
     }
 }
 
-fn sort_devices(devices: &mut [Device], mode: SortMode) {
+fn sort_devices(
+    devices: &mut [Device],
+    mode: SortMode,
+    availability: &HashMap<String, Availability>,
+) {
     devices.sort_by(|left, right| match mode {
         SortMode::Recent => recent_order(left, right).then_with(|| name_order(left, right)),
         SortMode::Name => name_order(left, right),
-        SortMode::Status => right
-            .online
-            .cmp(&left.online)
+        SortMode::Status => availability_rank(availability.get(&left.id))
+            .cmp(&availability_rank(availability.get(&right.id)))
             .then_with(|| name_order(left, right)),
     });
+}
+
+fn availability_rank(availability: Option<&Availability>) -> u8 {
+    match availability.map(|availability| availability.state) {
+        Some(AvailabilityState::Reachable) => 0,
+        Some(AvailabilityState::Unavailable) => 2,
+        Some(AvailabilityState::Unknown) | None => 1,
+    }
 }
 
 fn recent_order(left: &Device, right: &Device) -> Ordering {
@@ -386,13 +594,15 @@ fn name_order(left: &Device, right: &Device) -> Ordering {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::{Duration, Instant};
 
-    use portal_core::{Device, Snapshot, Theme};
+    use portal_core::{Device, ProbeMeasurement, Snapshot, Theme};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     use super::{
-        App, DiscoveryHealth, InputCommand, MessageLevel, MessageSource, SortMode,
-        ThemePickerCommand, format_last_connected, input_command, theme_picker_command,
+        App, AvailabilityState, DiscoveryHealth, InputCommand, MessageLevel, MessageSource,
+        REACHABLE_PROBE_INTERVAL, RETRY_PROBE_INTERVAL, SortMode, ThemePickerCommand,
+        format_last_connected, input_command, theme_picker_command,
     };
 
     #[test]
@@ -421,12 +631,189 @@ mod tests {
         assert_eq!(app.sort_mode.label(), "name");
         assert_eq!(ids(&app), ["offline-a", "offline-b", "online-z"]);
 
+        app.availability.get_mut("online-z").unwrap().state = AvailabilityState::Reachable;
+        app.availability.get_mut("offline-b").unwrap().state = AvailabilityState::Unavailable;
         app.cycle_sort();
         assert_eq!(app.sort_mode, SortMode::Status);
         assert_eq!(ids(&app), ["online-z", "offline-a", "offline-b"]);
 
         app.cycle_sort();
         assert_eq!(app.sort_mode, SortMode::Recent);
+    }
+
+    #[test]
+    fn probe_transitions_use_exact_hysteresis_and_intervals() {
+        let base = Instant::now();
+        let mut app = app_with_at(vec![device("one", "alpha", false, None)], base);
+
+        let first = app.start_next_probe(base).unwrap();
+        assert!(app.finish_probe(&first, Err("timeout".to_owned()), base));
+        let availability = app.availability.get("one").unwrap();
+        assert_eq!(availability.state, AvailabilityState::Unknown);
+        assert_eq!(availability.latency, None);
+        assert_eq!(availability.next_probe_at, base + RETRY_PROBE_INTERVAL);
+
+        let second = app.start_next_probe(base + RETRY_PROBE_INTERVAL).unwrap();
+        assert!(app.finish_probe(
+            &second,
+            Err("timeout".to_owned()),
+            base + RETRY_PROBE_INTERVAL,
+        ));
+        assert_eq!(
+            app.availability.get("one").unwrap().state,
+            AvailabilityState::Unavailable
+        );
+
+        let recovery_at = base + RETRY_PROBE_INTERVAL * 2;
+        let recovery = app.start_next_probe(recovery_at).unwrap();
+        assert!(app.finish_probe(
+            &recovery,
+            Ok(ProbeMeasurement {
+                latency: Some(Duration::from_millis(24)),
+            }),
+            recovery_at,
+        ));
+        let availability = app.availability.get("one").unwrap();
+        assert_eq!(availability.state, AvailabilityState::Reachable);
+        assert_eq!(availability.latency, Some(Duration::from_millis(24)));
+        assert_eq!(
+            availability.next_probe_at,
+            recovery_at + REACHABLE_PROBE_INTERVAL
+        );
+
+        let failure_at = recovery_at + REACHABLE_PROBE_INTERVAL;
+        let transient = app.start_next_probe(failure_at).unwrap();
+        assert!(app.finish_probe(&transient, Err("timeout".to_owned()), failure_at));
+        let availability = app.availability.get("one").unwrap();
+        assert_eq!(availability.state, AvailabilityState::Reachable);
+        assert_eq!(availability.latency, None);
+    }
+
+    #[test]
+    fn reconciliation_preserves_unchanged_nodes_resets_changed_ips_and_removes_old_nodes() {
+        let base = Instant::now();
+        let one = device_with_ip("one", "alpha", Ipv4Addr::new(100, 100, 0, 1));
+        let two = device_with_ip("two", "beta", Ipv4Addr::new(100, 100, 0, 2));
+        let mut app = app_with_at(vec![one.clone(), two], base);
+
+        let target = app.start_next_probe(base).unwrap();
+        app.finish_probe(
+            &target,
+            Ok(ProbeMeasurement {
+                latency: Some(Duration::from_millis(10)),
+            }),
+            base,
+        );
+        app.finish_refresh_at(
+            Ok(snapshot(vec![one.clone()])),
+            base + Duration::from_secs(1),
+        );
+        assert!(!app.availability.contains_key("two"));
+        assert_eq!(
+            app.availability.get("one").unwrap().next_probe_at,
+            base + REACHABLE_PROBE_INTERVAL
+        );
+
+        let changed = device_with_ip("one", "alpha", Ipv4Addr::new(100, 100, 0, 9));
+        app.finish_refresh_at(Ok(snapshot(vec![changed])), base + Duration::from_secs(2));
+        let availability = app.availability.get("one").unwrap();
+        assert_eq!(availability.state, AvailabilityState::Unknown);
+        assert_eq!(availability.ip, IpAddr::V4(Ipv4Addr::new(100, 100, 0, 9)));
+        assert_eq!(availability.next_probe_at, base + Duration::from_secs(2));
+    }
+
+    #[test]
+    fn scheduler_prioritizes_selected_due_device_and_allows_only_one_in_flight() {
+        let base = Instant::now();
+        let mut app = app_with_at(
+            vec![
+                device("one", "alpha", false, None),
+                device("two", "beta", false, None),
+                device("three", "gamma", false, None),
+            ],
+            base,
+        );
+        app.table_state.select(Some(2));
+
+        let target = app.start_next_probe(base).unwrap();
+        assert_eq!(target.id, "three");
+        assert!(app.start_next_probe(base).is_none());
+
+        app.finish_probe(&target, Err("timeout".to_owned()), base);
+        assert_eq!(app.start_next_probe(base).unwrap().id, "one");
+    }
+
+    #[test]
+    fn stale_probe_results_are_ignored_after_ip_change() {
+        let base = Instant::now();
+        let mut app = app_with_at(
+            vec![device_with_ip(
+                "one",
+                "alpha",
+                Ipv4Addr::new(100, 100, 0, 1),
+            )],
+            base,
+        );
+        let target = app.start_next_probe(base).unwrap();
+        app.finish_refresh_at(
+            Ok(snapshot(vec![device_with_ip(
+                "one",
+                "alpha",
+                Ipv4Addr::new(100, 100, 0, 9),
+            )])),
+            base,
+        );
+
+        assert!(!app.finish_probe(
+            &target,
+            Ok(ProbeMeasurement {
+                latency: Some(Duration::from_millis(1)),
+            }),
+            base,
+        ));
+        assert_eq!(
+            app.availability.get("one").unwrap().state,
+            AvailabilityState::Unknown
+        );
+    }
+
+    #[test]
+    fn status_result_reorders_without_changing_selected_stable_id() {
+        let base = Instant::now();
+        let mut app = app_with_at(
+            vec![
+                device("one", "alpha", false, None),
+                device("two", "zeta", false, None),
+            ],
+            base,
+        );
+        app.cycle_sort();
+        app.cycle_sort();
+        app.table_state.select(Some(1));
+        assert_eq!(app.selected_device().unwrap().id, "two");
+
+        let target = app.start_next_probe(base).unwrap();
+        app.finish_probe(
+            &target,
+            Ok(ProbeMeasurement {
+                latency: Some(Duration::from_millis(5)),
+            }),
+            base,
+        );
+
+        assert_eq!(ids(&app), ["two", "one"]);
+        assert_eq!(app.selected_device().unwrap().id, "two");
+    }
+
+    #[test]
+    fn disconnected_probe_worker_warning_is_reported_once() {
+        let mut app = App::default();
+        assert!(app.probe_send_failed());
+        assert_eq!(app.message.as_ref().unwrap().text, "Probe worker stopped");
+
+        app.set_action_message(MessageLevel::Info, "newer message");
+        assert!(!app.probe_send_failed());
+        assert_eq!(app.message.as_ref().unwrap().text, "newer message");
     }
 
     #[test]
@@ -632,8 +1019,12 @@ mod tests {
     }
 
     fn app_with(devices: Vec<Device>) -> App {
+        app_with_at(devices, Instant::now())
+    }
+
+    fn app_with_at(devices: Vec<Device>, now: Instant) -> App {
         let mut app = App::default();
-        app.finish_refresh(Ok(snapshot(devices)));
+        app.finish_refresh_at(Ok(snapshot(devices)), now);
         app
     }
 
@@ -668,5 +1059,12 @@ mod tests {
             notes: None,
             last_connected_at,
         }
+    }
+
+    fn device_with_ip(id: &str, name: &str, ip: Ipv4Addr) -> Device {
+        let mut device = device(id, name, false, None);
+        device.ips = vec![IpAddr::V4(ip)];
+        device.preferred_ip = IpAddr::V4(ip);
+        device
     }
 }

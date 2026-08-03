@@ -120,21 +120,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         eprintln!("warning: {warning}");
     }
     let device = resolve(&snapshot.devices, &target)?;
-    if !device.online {
-        eprintln!(
-            "warning: {} is reported offline; RustDesk will still be attempted",
-            device.display_name()
-        );
-    }
     if cli.dry_run {
         print!("{}", render_launch(&portal.launch_spec(action, device)?));
         return Ok(());
     }
     let outcome = portal.launch_with_warnings(action, device)?;
     for warning in outcome.warnings {
-        if !warning.contains("reported offline") {
-            eprintln!("warning: {warning}");
-        }
+        eprintln!("warning: {warning}");
     }
     Ok(())
 }
@@ -148,11 +140,10 @@ fn render_human(devices: &[Device]) -> String {
         return "No Tailscale peers found.\n".to_owned();
     }
 
-    let rows: Vec<[String; 5]> = devices
+    let rows: Vec<[String; 4]> = devices
         .iter()
         .map(|device| {
             [
-                if device.online { "online" } else { "offline" }.to_owned(),
                 device.display_name().to_owned(),
                 device.hostname.clone(),
                 device.os.clone(),
@@ -160,7 +151,7 @@ fn render_human(devices: &[Device]) -> String {
             ]
         })
         .collect();
-    let headers = ["STATUS", "NAME", "HOSTNAME", "OS", "IP"];
+    let headers = ["NAME", "HOSTNAME", "OS", "IP"];
     let mut widths = headers.map(str::len);
     for row in &rows {
         for (index, value) in row.iter().enumerate() {
@@ -223,21 +214,19 @@ fn confirm_provisioning() -> Result<bool, io::Error> {
 fn write_row(
     output: &mut String,
     values: impl IntoIterator<Item = impl AsRef<str>>,
-    widths: [usize; 5],
+    widths: [usize; 4],
 ) {
     let values: Vec<_> = values.into_iter().collect();
     writeln!(
         output,
-        "{:<status_width$}  {:<name_width$}  {:<hostname_width$}  {:<os_width$}  {}",
+        "{:<name_width$}  {:<hostname_width$}  {:<os_width$}  {}",
         values[0].as_ref(),
         values[1].as_ref(),
         values[2].as_ref(),
         values[3].as_ref(),
-        values[4].as_ref(),
-        status_width = widths[0],
-        name_width = widths[1],
-        hostname_width = widths[2],
-        os_width = widths[3],
+        name_width = widths[0],
+        hostname_width = widths[1],
+        os_width = widths[2],
     )
     .expect("writing to a String cannot fail");
 }
@@ -345,8 +334,9 @@ mod tests {
 
         let output = render_human(&devices);
 
-        assert!(output.starts_with("STATUS"));
-        assert!(output.contains("online"));
+        assert!(output.starts_with("NAME"));
+        assert!(!output.contains("STATUS"));
+        assert!(!output.contains("online"));
         assert!(output.contains("rig"));
         assert!(output.contains("alpha"));
         assert!(output.contains("beta"));

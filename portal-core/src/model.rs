@@ -14,6 +14,7 @@ pub struct Device {
     pub ips: Vec<IpAddr>,
     pub preferred_ip: IpAddr,
     pub os: String,
+    /// Raw Tailscale coordination hint, not Portal's active availability result.
     pub online: bool,
     pub tags: Vec<String>,
     pub favorite: bool,

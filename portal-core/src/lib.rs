@@ -3,6 +3,7 @@
 mod config;
 pub mod model;
 pub mod platform;
+mod probe;
 mod rustdesk;
 mod state;
 pub mod tailscale;
@@ -16,6 +17,7 @@ use thiserror::Error;
 
 use config::{Config, ConfigError, load_config, merge_metadata};
 pub use model::{Action, Device, Launch, LocalDevice};
+pub use probe::{ProbeError, ProbeMeasurement};
 pub use rustdesk::{
     LaunchOutcome, ProvisionError, ProvisionOutcome, ProvisionPlan, ProvisionStep, RustDeskError,
     ServiceState,
@@ -164,6 +166,13 @@ impl Portal {
             devices,
             warnings: warning.into_iter().collect(),
         })
+    }
+
+    pub fn probe(&self, device: &Device) -> Result<ProbeMeasurement, ProbeError> {
+        probe::probe(
+            self.config.executables.tailscale.as_deref(),
+            device.preferred_ip,
+        )
     }
 
     pub fn launch_spec(&self, action: Action, device: &Device) -> Result<Launch, PortalError> {
