@@ -3,9 +3,14 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+    Wrap,
+};
 
-use crate::app::{App, MessageLevel, MessageSource, format_last_connected};
+use crate::app::{
+    App, DiscoveryHealth, MessageLevel, MessageSource, ThemeOption, format_last_connected,
+};
 
 const MINIMUM_WIDTH: u16 = 48;
 const MINIMUM_HEIGHT: u16 = 12;
@@ -30,6 +35,9 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, theme: Theme, now: u6
     render_header(frame, vertical[0], app, theme);
     render_body(frame, vertical[2], app, theme, now);
     render_footer(frame, vertical[4], app, theme);
+    if app.theme_picker_open() {
+        render_theme_picker(frame, app, theme);
+    }
 }
 
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
@@ -52,11 +60,12 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let online = app.devices.iter().filter(|device| device.online).count();
-    let mut summary = format!("{online} online · {} devices", app.devices.len());
-    if app.refresh_in_flight {
-        summary.push_str(" · refreshing");
-    }
-    let summary_width = summary.chars().count().min(usize::from(u16::MAX)) as u16;
+    let summary = format!("{online} online · {} devices", app.devices.len());
+    let summary_width = summary
+        .chars()
+        .count()
+        .saturating_add(2)
+        .min(usize::from(u16::MAX)) as u16;
     let columns = Layout::horizontal([
         Constraint::Min(1),
         Constraint::Length(summary_width.min(area.width)),
@@ -73,11 +82,24 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         columns[0],
     );
     frame.render_widget(
-        Paragraph::new(summary).alignment(Alignment::Right).style(
-            Style::default()
-                .fg(color(theme.muted))
-                .bg(color(theme.background)),
-        ),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                match app.discovery_health {
+                    DiscoveryHealth::Healthy => "●",
+                    DiscoveryHealth::Unknown | DiscoveryHealth::Unavailable => "○",
+                },
+                Style::default().fg(color(match app.discovery_health {
+                    DiscoveryHealth::Healthy => theme.signal,
+                    DiscoveryHealth::Unknown | DiscoveryHealth::Unavailable => theme.muted,
+                })),
+            ),
+            Span::styled(
+                format!(" {summary}"),
+                Style::default().fg(color(theme.muted)),
+            ),
+        ]))
+        .alignment(Alignment::Right)
+        .style(Style::default().bg(color(theme.background))),
         columns[1],
     );
 }
@@ -338,6 +360,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Span::styled(format!(" sort: {}  ", app.sort_mode.label()), muted),
         Span::styled("r", accent),
         Span::styled(" refresh  ", muted),
+        Span::styled("t", accent),
+        Span::styled(" theme  ", muted),
         Span::styled("q", accent),
         Span::styled(" quit", muted),
     ]);
@@ -345,6 +369,49 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Paragraph::new(line).style(Style::default().bg(color(theme.background))),
         area,
     );
+}
+
+fn render_theme_picker(frame: &mut Frame<'_>, app: &App, theme: Theme) {
+    let area = centered_popup(frame.area(), 44, 9);
+    frame.render_widget(Clear, area);
+    let block = panel(" themes ", theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).split(inner);
+    let items = app.themes.iter().map(|option| theme_item(option, theme));
+    let mut state = ListState::default().with_selected(app.theme_picker_selected());
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(color(theme.background))
+                .bg(color(theme.accent))
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(base_style(theme));
+    frame.render_stateful_widget(list, rows[0], &mut state);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("↑/k ↓/j", Style::default().fg(color(theme.accent))),
+                Span::styled(" preview  ", Style::default().fg(color(theme.muted))),
+                Span::styled("enter", Style::default().fg(color(theme.accent))),
+                Span::styled(" apply", Style::default().fg(color(theme.muted))),
+            ]),
+            Line::from(vec![
+                Span::styled("esc/q", Style::default().fg(color(theme.accent))),
+                Span::styled(" cancel", Style::default().fg(color(theme.muted))),
+            ]),
+        ])
+        .style(base_style(theme)),
+        rows[1],
+    );
+}
+
+fn theme_item(option: &ThemeOption, theme: Theme) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        format!("  {}", option.name),
+        Style::default().fg(color(theme.foreground)),
+    )))
 }
 
 fn detail_line(label: &str, value: &str, theme: Theme) -> Line<'static> {
@@ -375,6 +442,23 @@ fn vertically_centered(area: Rect) -> Rect {
         Constraint::Fill(1),
     ])
     .split(area)[1]
+}
+
+fn centered_popup(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let vertical = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(height),
+        Constraint::Fill(1),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(width),
+        Constraint::Fill(1),
+    ])
+    .split(vertical[1])[1]
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -431,6 +515,23 @@ mod tests {
         assert!(text.contains("desktop · primary"));
         assert!(text.contains("Sanitized workstation"));
         assert!(text.contains("sort: recent"));
+        assert!(text.contains("t theme"));
+        assert!(!text.contains("refreshing"));
+    }
+
+    #[test]
+    fn header_uses_a_stable_discovery_health_dot() {
+        let mut pending = App::default();
+        let pending_text = render_text(&mut pending, 80, 24);
+        assert!(pending_text.lines().next().unwrap().contains("○ 0 online"));
+
+        pending.finish_refresh(Ok(snapshot(Vec::new())));
+        let healthy_text = render_text(&mut pending, 80, 24);
+        assert!(healthy_text.lines().next().unwrap().contains("● 0 online"));
+
+        pending.finish_refresh(Err("connection lost".to_owned()));
+        let failed_text = render_text(&mut pending, 80, 24);
+        assert!(failed_text.lines().next().unwrap().contains("○ 0 online"));
     }
 
     #[test]
@@ -507,13 +608,46 @@ mod tests {
         assert!(!text.contains("sort: recent"));
     }
 
+    #[test]
+    fn theme_picker_matches_the_previewed_theme() {
+        let mut app = populated_app();
+        app.open_theme_picker();
+        app.select_next_theme();
+        let theme = app.visible_theme();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut app, theme, 200))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = buffer_text(buffer, 80, 24);
+
+        assert!(text.contains("themes"));
+        assert!(text.contains("Portal"));
+        assert!(text.contains("Hacker"));
+        assert!(text.contains("Cyber Cyan"));
+        assert!(text.contains("preview"));
+        assert!(text.contains("enter apply"));
+        assert_eq!(theme, Theme::hacker());
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|cell| cell.bg == color(theme.accent))
+        );
+    }
+
     fn render_text(app: &mut App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let theme = app.visible_theme();
         terminal
-            .draw(|frame| render(frame, app, Theme::default(), 200))
+            .draw(|frame| render(frame, app, theme, 200))
             .unwrap();
-        let buffer = terminal.backend().buffer();
+        buffer_text(terminal.backend().buffer(), width, height)
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
         (0..height)
             .map(|y| {
                 (0..width)

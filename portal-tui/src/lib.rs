@@ -9,7 +9,9 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use app::{App, InputCommand, MessageLevel, input_command};
+use app::{
+    App, InputCommand, MessageLevel, ThemePickerCommand, input_command, theme_picker_command,
+};
 use portal_core::{Action, Portal, Snapshot};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
@@ -20,7 +22,7 @@ const EVENT_POLL_MAX: Duration = Duration::from_millis(100);
 /// Runs Portal's interactive terminal interface.
 pub fn run(portal: Portal) -> io::Result<()> {
     let portal = Arc::new(portal);
-    let theme = portal.theme();
+    let configured_theme = portal.theme();
     let (request_tx, request_rx) = mpsc::sync_channel(1);
     let (response_tx, response_rx) = mpsc::channel();
     let worker_portal = Arc::clone(&portal);
@@ -37,18 +39,10 @@ pub fn run(portal: Portal) -> io::Result<()> {
             }
         })?;
 
-    let mut app = App::default();
+    let mut app = App::new(configured_theme);
     request_refresh(&mut app, &request_tx);
-    let result = ratatui::run(|terminal| {
-        run_loop(
-            terminal,
-            &portal,
-            theme,
-            &request_tx,
-            &response_rx,
-            &mut app,
-        )
-    });
+    let result =
+        ratatui::run(|terminal| run_loop(terminal, &portal, &request_tx, &response_rx, &mut app));
 
     drop(request_tx);
     let _ = worker.join();
@@ -58,7 +52,6 @@ pub fn run(portal: Portal) -> io::Result<()> {
 fn run_loop(
     terminal: &mut DefaultTerminal,
     portal: &Portal,
-    theme: portal_core::Theme,
     request_tx: &SyncSender<()>,
     response_rx: &Receiver<Result<Snapshot, String>>,
     app: &mut App,
@@ -97,6 +90,7 @@ fn run_loop(
 
         if needs_redraw {
             let now = unix_seconds();
+            let theme = app.visible_theme();
             terminal.draw(|frame| ui::render(frame, app, theme, now))?;
             needs_redraw = false;
         }
@@ -104,7 +98,17 @@ fn run_loop(
         if event::poll(EVENT_POLL_MAX)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if let Some(command) = input_command(key) {
+                    if app.theme_picker_open() {
+                        if let Some(command) = theme_picker_command(key) {
+                            needs_redraw = true;
+                            match command {
+                                ThemePickerCommand::Previous => app.select_previous_theme(),
+                                ThemePickerCommand::Next => app.select_next_theme(),
+                                ThemePickerCommand::Apply => app.apply_theme_picker(),
+                                ThemePickerCommand::Cancel => app.cancel_theme_picker(),
+                            }
+                        }
+                    } else if let Some(command) = input_command(key) {
                         needs_redraw = true;
                         match command {
                             InputCommand::Previous => app.select_previous(),
@@ -117,6 +121,7 @@ fn run_loop(
                             }
                             InputCommand::Refresh => request_refresh(app, request_tx),
                             InputCommand::CycleSort => app.cycle_sort(),
+                            InputCommand::OpenThemePicker => app.open_theme_picker(),
                             InputCommand::Quit => return Ok(()),
                         }
                     }

@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use portal_core::{Device, Snapshot};
+use portal_core::{Device, Snapshot, Theme};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::widgets::TableState;
 
@@ -42,6 +42,24 @@ pub(crate) enum MessageSource {
     Action,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DiscoveryHealth {
+    Unknown,
+    Healthy,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ThemeOption {
+    pub(crate) name: &'static str,
+    pub(crate) theme: Theme,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ThemePicker {
+    selected: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StatusMessage {
     pub(crate) level: MessageLevel,
@@ -58,10 +76,25 @@ pub(crate) struct App {
     pub(crate) refresh_in_flight: bool,
     pub(crate) refresh_pending: bool,
     pub(crate) message: Option<StatusMessage>,
+    pub(crate) discovery_health: DiscoveryHealth,
+    pub(crate) themes: Vec<ThemeOption>,
+    active_theme: usize,
+    theme_picker: Option<ThemePicker>,
 }
 
 impl Default for App {
     fn default() -> Self {
+        Self::new(Theme::default())
+    }
+}
+
+impl App {
+    pub(crate) fn new(configured_theme: Theme) -> Self {
+        let configured_name = if configured_theme == Theme::portal() {
+            "Portal"
+        } else {
+            "Configured"
+        };
         Self {
             devices: Vec::new(),
             table_state: TableState::default(),
@@ -70,11 +103,70 @@ impl Default for App {
             refresh_in_flight: false,
             refresh_pending: false,
             message: None,
+            discovery_health: DiscoveryHealth::Unknown,
+            themes: vec![
+                ThemeOption {
+                    name: configured_name,
+                    theme: configured_theme,
+                },
+                ThemeOption {
+                    name: "Hacker",
+                    theme: Theme::hacker(),
+                },
+                ThemeOption {
+                    name: "Cyber Cyan",
+                    theme: Theme::cyber_cyan(),
+                },
+            ],
+            active_theme: 0,
+            theme_picker: None,
         }
     }
-}
 
-impl App {
+    pub(crate) fn visible_theme(&self) -> Theme {
+        self.themes[self
+            .theme_picker
+            .map_or(self.active_theme, |picker| picker.selected)]
+        .theme
+    }
+
+    pub(crate) fn theme_picker_open(&self) -> bool {
+        self.theme_picker.is_some()
+    }
+
+    pub(crate) fn theme_picker_selected(&self) -> Option<usize> {
+        self.theme_picker.map(|picker| picker.selected)
+    }
+
+    pub(crate) fn open_theme_picker(&mut self) {
+        self.theme_picker = Some(ThemePicker {
+            selected: self.active_theme,
+        });
+    }
+
+    pub(crate) fn select_previous_theme(&mut self) {
+        if let Some(picker) = &mut self.theme_picker {
+            picker.selected = picker.selected.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn select_next_theme(&mut self) {
+        if let Some(picker) = &mut self.theme_picker {
+            picker.selected = picker.selected.saturating_add(1).min(self.themes.len() - 1);
+        }
+    }
+
+    pub(crate) fn apply_theme_picker(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            self.active_theme = picker.selected;
+            let name = self.themes[self.active_theme].name;
+            self.set_action_message(MessageLevel::Info, format!("Applied {name} theme"));
+        }
+    }
+
+    pub(crate) fn cancel_theme_picker(&mut self) {
+        self.theme_picker = None;
+    }
     pub(crate) fn selected_device(&self) -> Option<&Device> {
         self.table_state
             .selected()
@@ -121,8 +213,12 @@ impl App {
         self.initial_load_complete = true;
 
         match result {
-            Ok(snapshot) => self.apply_snapshot(snapshot),
+            Ok(snapshot) => {
+                self.discovery_health = DiscoveryHealth::Healthy;
+                self.apply_snapshot(snapshot);
+            }
             Err(error) => {
+                self.discovery_health = DiscoveryHealth::Unavailable;
                 self.message = Some(StatusMessage {
                     level: MessageLevel::Error,
                     text: error,
@@ -196,6 +292,7 @@ pub(crate) enum InputCommand {
     Transfer,
     Refresh,
     CycleSort,
+    OpenThemePicker,
     Quit,
 }
 
@@ -211,7 +308,30 @@ pub(crate) fn input_command(event: KeyEvent) -> Option<InputCommand> {
         KeyCode::Char('s') => Some(InputCommand::Transfer),
         KeyCode::Char('r') => Some(InputCommand::Refresh),
         KeyCode::Tab => Some(InputCommand::CycleSort),
+        KeyCode::Char('t') => Some(InputCommand::OpenThemePicker),
         KeyCode::Char('q') | KeyCode::Esc => Some(InputCommand::Quit),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ThemePickerCommand {
+    Previous,
+    Next,
+    Apply,
+    Cancel,
+}
+
+pub(crate) fn theme_picker_command(event: KeyEvent) -> Option<ThemePickerCommand> {
+    if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return None;
+    }
+
+    match event.code {
+        KeyCode::Up | KeyCode::Char('k') => Some(ThemePickerCommand::Previous),
+        KeyCode::Down | KeyCode::Char('j') => Some(ThemePickerCommand::Next),
+        KeyCode::Enter => Some(ThemePickerCommand::Apply),
+        KeyCode::Esc | KeyCode::Char('q' | 't') => Some(ThemePickerCommand::Cancel),
         _ => None,
     }
 }
@@ -264,12 +384,12 @@ fn name_order(left: &Device, right: &Device) -> Ordering {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use portal_core::{Device, Snapshot};
+    use portal_core::{Device, Snapshot, Theme};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     use super::{
-        App, InputCommand, MessageLevel, MessageSource, SortMode, format_last_connected,
-        input_command,
+        App, DiscoveryHealth, InputCommand, MessageLevel, MessageSource, SortMode,
+        ThemePickerCommand, format_last_connected, input_command, theme_picker_command,
     };
 
     #[test]
@@ -386,6 +506,48 @@ mod tests {
     }
 
     #[test]
+    fn discovery_health_tracks_valid_responses_and_failures() {
+        let mut app = App::default();
+        assert_eq!(app.discovery_health, DiscoveryHealth::Unknown);
+
+        app.finish_refresh(Ok(snapshot(Vec::new())));
+        assert_eq!(app.discovery_health, DiscoveryHealth::Healthy);
+
+        app.finish_refresh(Err("connection lost".to_owned()));
+        assert_eq!(app.discovery_health, DiscoveryHealth::Unavailable);
+    }
+
+    #[test]
+    fn theme_picker_previews_applies_and_cancels_presets() {
+        let configured = Theme::portal();
+        let mut app = App::new(configured);
+        assert_eq!(app.visible_theme(), configured);
+        assert_eq!(
+            app.themes
+                .iter()
+                .map(|theme| theme.name)
+                .collect::<Vec<_>>(),
+            ["Portal", "Hacker", "Cyber Cyan"]
+        );
+
+        app.open_theme_picker();
+        app.select_next_theme();
+        assert_eq!(app.visible_theme(), Theme::hacker());
+        app.cancel_theme_picker();
+        assert_eq!(app.visible_theme(), configured);
+
+        app.open_theme_picker();
+        app.select_next_theme();
+        app.select_next_theme();
+        app.select_next_theme();
+        assert_eq!(app.visible_theme(), Theme::cyber_cyan());
+        app.apply_theme_picker();
+        assert_eq!(app.visible_theme(), Theme::cyber_cyan());
+        assert!(!app.theme_picker_open());
+        assert!(app.message.as_ref().unwrap().text.contains("Cyber Cyan"));
+    }
+
+    #[test]
     fn key_mapping_accepts_press_and_repeat_but_not_release() {
         assert_eq!(
             command(KeyCode::Up, KeyEventKind::Press),
@@ -412,11 +574,36 @@ mod tests {
             Some(InputCommand::CycleSort)
         );
         assert_eq!(
+            command(KeyCode::Char('t'), KeyEventKind::Press),
+            Some(InputCommand::OpenThemePicker)
+        );
+        assert_eq!(
             command(KeyCode::Esc, KeyEventKind::Press),
             Some(InputCommand::Quit)
         );
         assert_eq!(command(KeyCode::Down, KeyEventKind::Release), None);
         assert_eq!(command(KeyCode::Char('x'), KeyEventKind::Press), None);
+    }
+
+    #[test]
+    fn theme_picker_key_mapping_is_contextual() {
+        assert_eq!(
+            picker_command(KeyCode::Up),
+            Some(ThemePickerCommand::Previous)
+        );
+        assert_eq!(
+            picker_command(KeyCode::Char('j')),
+            Some(ThemePickerCommand::Next)
+        );
+        assert_eq!(
+            picker_command(KeyCode::Enter),
+            Some(ThemePickerCommand::Apply)
+        );
+        assert_eq!(
+            picker_command(KeyCode::Esc),
+            Some(ThemePickerCommand::Cancel)
+        );
+        assert_eq!(picker_command(KeyCode::Char('x')), None);
     }
 
     #[test]
@@ -431,6 +618,14 @@ mod tests {
 
     fn command(code: KeyCode, kind: KeyEventKind) -> Option<InputCommand> {
         input_command(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
+    }
+
+    fn picker_command(code: KeyCode) -> Option<ThemePickerCommand> {
+        theme_picker_command(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ))
     }
 
     fn app_with(devices: Vec<Device>) -> App {

@@ -22,6 +22,41 @@ impl ThemeColor {
     }
 }
 
+impl Theme {
+    #[must_use]
+    pub const fn portal() -> Self {
+        Self {
+            background: ThemeColor::new(0x0b, 0x0f, 0x14),
+            foreground: ThemeColor::new(0xd6, 0xde, 0xe8),
+            accent: ThemeColor::new(0x7a, 0xa2, 0xf7),
+            muted: ThemeColor::new(0x65, 0x71, 0x80),
+            signal: ThemeColor::new(0x7f, 0xd8, 0x8f),
+        }
+    }
+
+    #[must_use]
+    pub const fn hacker() -> Self {
+        Self {
+            background: ThemeColor::new(0x03, 0x08, 0x05),
+            foreground: ThemeColor::new(0x00, 0xff, 0x41),
+            accent: ThemeColor::new(0x00, 0xc8, 0x53),
+            muted: ThemeColor::new(0x1b, 0x5e, 0x20),
+            signal: ThemeColor::new(0x7c, 0xff, 0x6b),
+        }
+    }
+
+    #[must_use]
+    pub const fn cyber_cyan() -> Self {
+        Self {
+            background: ThemeColor::new(0x05, 0x0a, 0x12),
+            foreground: ThemeColor::new(0xc9, 0xf7, 0xff),
+            accent: ThemeColor::new(0x00, 0xe5, 0xff),
+            muted: ThemeColor::new(0x3c, 0x6a, 0x73),
+            signal: ThemeColor::new(0x5f, 0xfb, 0xf1),
+        }
+    }
+}
+
 impl FromStr for ThemeColor {
     type Err = ThemeColorParseError;
 
@@ -64,13 +99,7 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self {
-            background: ThemeColor::new(0x0b, 0x0f, 0x14),
-            foreground: ThemeColor::new(0xd6, 0xde, 0xe8),
-            accent: ThemeColor::new(0x7a, 0xa2, 0xf7),
-            muted: ThemeColor::new(0x65, 0x71, 0x80),
-            signal: ThemeColor::new(0x7f, 0xd8, 0x8f),
-        }
+        Self::portal()
     }
 }
 
@@ -87,6 +116,20 @@ mod tests {
         assert_eq!(theme.accent, rgb(0x7a, 0xa2, 0xf7));
         assert_eq!(theme.muted, rgb(0x65, 0x71, 0x80));
         assert_eq!(theme.signal, rgb(0x7f, 0xd8, 0x8f));
+    }
+
+    #[test]
+    fn preset_palettes_are_distinct_and_cohesive() {
+        let portal = Theme::portal();
+        let hacker = Theme::hacker();
+        let cyber = Theme::cyber_cyan();
+
+        assert_eq!(portal, Theme::default());
+        assert_ne!(hacker, portal);
+        assert_ne!(cyber, portal);
+        assert_ne!(hacker, cyber);
+        assert_eq!(hacker.foreground, rgb(0x00, 0xff, 0x41));
+        assert_eq!(cyber.accent, rgb(0x00, 0xe5, 0xff));
     }
 
     #[test]
