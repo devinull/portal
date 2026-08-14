@@ -1,0 +1,22 @@
+Name:           portal
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Reach Tailscale devices through RustDesk
+License:        MIT
+URL:            https://github.com/devinull/portal
+Source0:        portal
+
+%description
+Portal is a terminal interface for discovering desktop peers on Tailscale and
+opening RustDesk desktop or file-transfer sessions.
+
+%install
+mkdir -p %{buildroot}/usr/bin
+install -m 0755 %{SOURCE0} %{buildroot}/usr/bin/portal
+
+%files
+/usr/bin/portal
+
+%changelog
+* Thu Aug 13 2026 Portal contributors <devinull@users.noreply.github.com> - @VERSION@-1
+- Initial release

@@ -1,89 +1,75 @@
 # Portal
 
-Portal is a small cross-platform CLI and terminal interface for discovering
-devices on a personal Tailscale network and opening them directly in RustDesk.
+Portal is a cross-platform terminal interface for finding desktop peers on a
+Tailscale network and opening them directly in RustDesk.
 
-Portal includes:
-
-- On-demand `tailscale status --json` discovery.
-- Optional TOML nicknames, tags, favorites, and notes.
-- Exact resolution by nickname, hostname, DNS name, IPv4, or IPv6.
-- Human-readable and scriptable JSON device lists.
-- Active background TSMP reachability checks and concise round-trip latency in
-  the TUI.
-- RustDesk remote desktop and file-transfer actions.
-- Stable-ID last-connected state.
-- Preview-first local Windows provisioning.
+It combines asynchronous discovery, active Tailscale reachability checks,
+round-trip latency, favorites and nicknames, and RustDesk desktop or file
+transfer actions in one responsive TUI.
 
 ## Requirements
 
 - Tailscale installed, running, and authenticated.
-- RustDesk installed on the controller and target.
-- Direct IP access enabled on targets.
-- A supported stable Rust toolchain to build from source.
+- RustDesk installed on the controller and target devices.
+- RustDesk direct IP access enabled on target devices.
 
-Portal searches `PATH` first, then common platform installation paths. On
-Windows it finds standard installations under `C:\Program Files\Tailscale` and
-`C:\Program Files\RustDesk`.
+Portal never accepts or stores Tailscale credentials or RustDesk passwords.
 
-iOS and Android peers are excluded from discovery because Portal's Stage 1
-RustDesk desktop and file-transfer actions cannot target those devices.
+## Install
 
-## Build
+### Windows
+
+Download `PortalSetup-<version>-x86_64.exe` from the
+[latest GitHub Release](https://github.com/devinull/portal/releases/latest).
+The installer lets you choose between a current-user installation (defaulting
+to `%LOCALAPPDATA%\Programs\Portal`) and an all-users installation (defaulting
+to `C:\Program Files\Portal` and requiring administrator approval). You can
+choose another destination, optionally add Portal to the matching user or
+machine `PATH`, and remove it later through Windows Installed Apps. If Tailscale
+or RustDesk is not detected, the final page can open that product's official
+download page.
+
+A portable Windows ZIP is also published for users who do not want an installer.
+
+### macOS
+
+Download the PKG matching Apple Silicon (`aarch64`) or Intel (`x86_64`) and run
+it. The package installs `portal` in `/usr/local/bin`.
+
+### Linux
+
+Install the matching DEB or RPM from GitHub Releases, or extract the portable
+archive and place `portal` somewhere on `PATH`.
+
+See [setup instructions](docs/setup.md) for dependency and first-run details.
+
+## Use
+
+Open a new terminal after installation and run:
 
 ```text
-cargo build --workspace --release
+portal
 ```
 
-The executable is produced at `target/release/portal` (`portal.exe` on
-Windows). No installation step is required.
-
-## Commands
+Useful non-interactive commands include:
 
 ```text
 portal list
 portal list --json
-portal <name>
 portal connect <name>
 portal share <name>
-portal transfer <name>
+portal --dry-run connect <name>
 portal init <name>
-portal provision <name>
 ```
 
-`portal <name>` is shorthand for `portal connect <name>`. `transfer` aliases
-`share`, and `provision` aliases `init`.
-
-Use `--dry-run` with an action to resolve the device and display each executable
-argument separately without starting RustDesk:
-
-```text
-portal --dry-run connect rig
-portal --dry-run share rig
-portal --dry-run init rig
-```
-
-Bare `portal` opens the interactive TUI. The human-readable `portal list` output
-does not claim a live status because it does not delay the command to probe every
-peer. In `portal list --json`, `online` remains the raw Tailscale coordination
-hint for compatibility; it is not Portal's active availability result.
+`portal <name>` is shorthand for `portal connect <name>`. `share` opens
+RustDesk file transfer. On Windows, `portal init <name>` previews and optionally
+applies local RustDesk receiving configuration.
 
 ## Configuration
 
-Use the platform config directory or override it globally:
-
-```text
-portal --config path/to/config.toml list
-```
-
-Default locations are:
-
-- Windows: `%APPDATA%\portal\config.toml`
-- macOS: `~/Library/Application Support/portal/config.toml`
-- Linux: `$XDG_CONFIG_HOME/portal/config.toml`, with the normal platform
-  fallback
-
-Example:
+Portal works without a configuration file. Optional nicknames, tags, favorites,
+notes, executable overrides, and theme colors use TOML:
 
 ```toml
 [executables]
@@ -97,78 +83,64 @@ favorite = true
 notes = "Main workstation"
 ```
 
-Device table keys match discovered hostnames case-insensitively. Unknown fields,
-empty nicknames or tags, and duplicate nicknames are errors. Exact duplicate
-tags are removed while preserving user order. Metadata for undiscovered
-hostnames remains dormant.
+Default configuration locations:
 
-Credentials are not accepted in this file.
+- Windows: `%APPDATA%\portal\config.toml`
+- macOS: `~/Library/Application Support/portal/config.toml`
+- Linux: `$XDG_CONFIG_HOME/portal/config.toml`, with the normal platform fallback
 
-## RustDesk actions
+## How availability works
 
-RustDesk 1.4.6 was verified to use these argument vectors:
+Portal keeps Tailscale's JSON status for discovery and metadata, then checks each
+desktop peer sequentially with a lightweight TSMP probe. A peer becomes
+unavailable only after two consecutive failures and returns to reachable after
+one success. Probe output is never logged or persisted.
+
+The `online` value in `portal list --json` remains the raw Tailscale coordination
+hint for compatibility; it is not Portal's active reachability result.
+
+## Build from source
+
+Install stable Rust and run:
 
 ```text
-Connect:  ["--connect", "<preferred-ip>"]
-Transfer: ["--file-transfer", "<preferred-ip>"]
+cargo build --workspace --release --locked
 ```
 
-Portal always passes the preferred Tailscale IP as a separate process argument
-and never invokes RustDesk or Tailscale through a shell. IPv4 is preferred when
-available, with IPv6 as the fallback.
+The executable is written to `target/release/portal` (`portal.exe` on Windows).
 
-Devices remain actionable regardless of availability. The TUI gives a
-non-blocking warning only when its active checks have explicitly marked a device
-unavailable. Portal returns after RustDesk starts rather than waiting for the GUI
-session to close.
+To build and smoke-test the Windows installer:
 
-## Local provisioning
+```powershell
+winget install --id JRSoftware.InnoSetup --exact
+./packaging/windows/build-installer.ps1
+./packaging/windows/test-installer.ps1 -TestPathRegistration
+```
 
-Stage 1 `portal init <name>` prepares the current Windows machine to receive
-connections from the selected peer and other tailnet devices. It:
+## Releases
 
-1. Ensures the installed RustDesk service is running.
-2. Enables direct IP access.
-3. Restricts incoming access to `100.64.0.0/10`.
-4. Reads the resulting service and option state before reporting success.
+Pushing a version tag such as `v0.0.1` runs the release workflow, builds native
+Windows, macOS, and Linux artifacts, generates checksums and provenance, and
+creates a draft GitHub Release. See [the release guide](docs/releasing.md).
 
-The command always prints the exact plan first. `--dry-run` makes no changes.
-Without `--dry-run`, Portal asks for confirmation and requires an elevated
-terminal. Re-running the plan is safe: an existing running service is not
-reinstalled, and the two options are set to the same desired values.
+## Platform status
 
-Portal does not download RustDesk or accept a password. RustDesk's password
-operation exposes the value in the process argument vector, so password
-provisioning remains deferred.
+- Windows: runtime-tested, including RustDesk provisioning.
+- macOS: compiled in CI; dependency permissions and runtime behavior still need
+  real-machine release validation.
+- Linux: compiled in CI; distribution packages and runtime behavior still need
+  clean-machine release validation.
 
-macOS and Linux provisioning is intentionally deferred until it can be tested
-on those platforms. macOS also requires interactive privacy approval that a CLI
-cannot truthfully automate.
+## Security
 
-## State and security
+Portal launches Tailscale and RustDesk directly with separate process arguments;
+it never invokes them through a shell. It does not persist raw Tailscale status,
+ping output, credentials, auth URLs, or private tailnet names outside the device
+fields shown in the interface.
 
-Machine-managed `state.json` is stored separately under the platform local-data
-directory. It contains only stable Tailscale node IDs and Unix timestamps.
-Updates use a temporary file in the same directory followed by atomic rename.
-Invalid state is nonfatal and produces a warning.
+Tailscale and RustDesk are separate products with their own licenses and update
+channels. Portal's installer does not bundle their binaries.
 
-Portal never persists credentials, raw Tailscale status or ping output,
-executable paths, or configuration paths in JSON list output or usage state.
-Active availability and latency remain in TUI memory only. The tailnet is the
-primary transport trust boundary.
+## License
 
-## Current limitations
-
-- The GUI, vault, port forwarding, and on-demand path diagnostics are later
-  stages.
-- Password entry and storage are not implemented.
-- Successful RustDesk authentication depends on target configuration.
-- Windows provisioning assumes RustDesk is already installed.
-- Windows is runtime-tested. macOS and Linux are compile-tested by CI but have
-  not been runtime-validated.
-- Actual bidirectional file transfer requires an authenticated target and
-  remains a manual environment check.
-- iOS and Android tailnet peers are intentionally hidden.
-
-The authoritative design and validation checklist is in
-[`docs/plans/stage-1-implementation.md`](docs/plans/stage-1-implementation.md).
+Portal is available under the [MIT License](LICENSE).

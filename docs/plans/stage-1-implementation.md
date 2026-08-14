@@ -1,8 +1,8 @@
 # Portal Stage 1 Implementation Plan
 
-Status: Ready for implementation
+Status: Implemented. This is a historical execution plan; current behavior is
+documented in the repository README and setup guide.
 Scope: Stage 1 — CLI
-Primary product reference: `C:\Files\Vaults\Ghost\Dev\Notebook\portal-prd.md`
 
 ## 1. Objective
 
@@ -31,7 +31,7 @@ formatted strings.
 
 These facts were verified when this plan was written:
 
-- Workspace: `C:\Code\apps\portal`
+- Workspace: the repository root
 - The workspace started empty and is not yet a Git repository.
 - Rust and Cargo are not installed or are not available on `PATH`.
 - Tailscale 1.88.3 is available on `PATH`.

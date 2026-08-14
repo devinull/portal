@@ -1,7 +1,7 @@
 # Portal Installer and Distribution Strategy
 
-Status: design guidance for a future packaging phase. Portal remains focused on
-the CLI/TUI until its planned functionality and runtime behavior are complete.
+Status: initial packaging implemented for Portal v0.0.1; later distribution and
+prerequisite automation remain roadmap guidance.
 
 ## 1. Goals
 
@@ -32,22 +32,16 @@ the upstream source used by package-manager manifests.
 
 #### Primary installer
 
-Publish a signed `PortalSetup-<version>-<arch>.exe` bootstrapper.
+Portal v0.0.1 uses an Inno Setup EXE named
+`PortalSetup-<version>-x86_64.exe`. It supports current-user installation under
+Local AppData and elevated all-users installation under Program Files, optional
+scope-appropriate `PATH` registration, Start menu shortcuts, upgrades, and
+uninstallation. Missing Tailscale or RustDesk installations are detected and
+offered official download links; their installers are not bundled or executed.
 
-The bootstrapper is the best consumer-facing artifact because it can:
-
-- Install Portal itself.
-- Display a prerequisite summary before making changes;
-- download Tailscale or RustDesk only after explicit consent;
-- invoke vendor installers with separate argument vectors;
-- request elevation only when an installation needs it; and
-- verify the result before exiting.
-
-Package Portal itself as an MSI inside or alongside the bootstrapper. The MSI
-should install `portal.exe` in a versioned directory under `Program Files`, add a
-stable installation directory to the machine `PATH`, register clean uninstall
-metadata, and support upgrades. Also publish the standalone MSI for managed and
-enterprise deployments that do not want prerequisite bootstrapping.
+An MSI or prerequisite bootstrapper may be considered later if managed
+deployment or verified dependency automation becomes a real requirement. It is
+not part of the initial release.
 
 Do not use MSIX as the primary format. Its application isolation and execution
 alias model add friction for a terminal tool that launches external desktop
@@ -374,7 +368,7 @@ a long wizard:
 ```text
 Portal setup
 
-✓ Portal 0.1.0             installed
+✓ Portal 0.0.1             installed
 ! Tailscale                installed · login required
 × RustDesk                 not found
 
@@ -403,7 +397,7 @@ only in the interactive UI, consistent with the TUI's existing privacy model.
 
 For every tagged Portal release:
 
-1. Build Windows x86-64 and ARM64 artifacts.
+1. Build Windows x86-64 artifacts; add ARM64 after it can be validated.
 2. Build macOS Apple Silicon and Intel artifacts, or one universal artifact.
 3. Build Linux x86-64 and ARM64 artifacts using a conservative libc baseline.
 4. Run formatting, Clippy, tests, and release builds before packaging.
@@ -429,10 +423,11 @@ describes tagged releases and attached binary assets.
   retained; `setup` is action-oriented, while `doctor` explains problems.
 - Add sanitized fixtures and platform-path tests.
 
-### Phase B: Windows release and guided bootstrapper
+### Phase B: Windows release and guided installer
 
-- Produce signed EXE and MSI artifacts.
-- Install Portal to a stable machine-level `PATH` location.
+- Produce a signed Inno Setup EXE and portable ZIP.
+- Support current-user and all-users install locations and matching `PATH`
+  registration.
 - Detect Tailscale and RustDesk.
 - Open official installation sources and verify the result.
 - Reuse the existing Windows `portal init` flow for optional receiving setup.

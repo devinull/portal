@@ -632,7 +632,7 @@ checksum = "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3"
 
 [[package]]
 name = "portal-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "clap",
  "portal-core",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "portal-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "directories",
  "serde",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "portal-tui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "portal-core",
  "ratatui",

@@ -1,5 +1,8 @@
 # Node Availability and Latency Implementation Plan
 
+Status: Implemented. This is retained as a historical execution and validation
+record.
+
 ## 1. Objective
 
 Replace Portal's use of the Tailscale `Online` JSON field as the displayed peer

@@ -1,10 +1,10 @@
 # Portal Stage 2 Implementation Plan
 
-Status: Ready for implementation
+Status: Implemented. This is a historical execution plan; design-time version
+and repository-visibility assumptions below may be superseded by the release
+documentation.
 
 Scope: Stage 2 — TUI and lightweight binary distribution
-
-Primary product reference: `C:\Files\Vaults\Ghost\Dev\Notebook\portal-prd.md`
 
 Stage 1 execution reference: `docs/plans/stage-1-implementation.md`
 
@@ -38,7 +38,7 @@ separate `portal-tui` command.
 An implementing agent must read the following files completely before making
 changes:
 
-1. `C:\Files\Vaults\Ghost\Dev\Notebook\portal-prd.md`
+1. The original product requirements
 2. `docs/plans/stage-1-implementation.md`
 3. This plan
 4. `README.md` and `.github/workflows/check.yml`

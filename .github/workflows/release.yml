@@ -1,0 +1,228 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build without creating a release"
+        required: true
+        default: "0.0.1"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PORTAL_RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${PORTAL_RELEASE_VERSION#v}"
+          [[ "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Release version is not semantic x.y.z: $tag_version" >&2
+            exit 1
+          }
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "portal-cli") | .version')"
+          test "$tag_version" = "$cargo_version" || {
+            echo "Tag $GITHUB_REF_NAME does not match Cargo version $cargo_version" >&2
+            exit 1
+          }
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
+
+  windows:
+    needs: validate
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+      - name: Build Portal
+        run: cargo build --workspace --release --locked
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          winget install --id JRSoftware.InnoSetup --exact --version 6.7.3 --silent `
+            --accept-package-agreements --accept-source-agreements `
+            --disable-interactivity
+      - name: Sign Portal executable
+        if: env.WINDOWS_CERTIFICATE_PFX != ''
+        shell: pwsh
+        run: ./packaging/windows/sign-artifacts.ps1 -Path target/release/portal.exe
+      - name: Build installer and portable archive
+        shell: pwsh
+        run: |
+          $version = $env:PORTAL_RELEASE_VERSION.TrimStart('v')
+          ./packaging/windows/build-installer.ps1 -SkipBuild -Version $version
+      - name: Sign Windows installer
+        if: env.WINDOWS_CERTIFICATE_PFX != ''
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist/PortalSetup-*-x86_64.exe | Select-Object -ExpandProperty FullName
+          ./packaging/windows/sign-artifacts.ps1 -Path $installer
+      - name: Smoke-test Windows installer
+        shell: pwsh
+        run: |
+          $version = $env:PORTAL_RELEASE_VERSION.TrimStart('v')
+          ./packaging/windows/test-installer.ps1 -ExpectedVersion $version -TestPathRegistration
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+      MACOS_APPLICATION_IDENTITY: ${{ secrets.MACOS_APPLICATION_IDENTITY }}
+      MACOS_INSTALLER_IDENTITY: ${{ secrets.MACOS_INSTALLER_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+      - name: Build Portal
+        run: cargo build --workspace --release --locked --target "${{ matrix.target }}"
+      - name: Import Developer ID certificates
+        if: env.MACOS_CERTIFICATE_P12 != ''
+        run: bash packaging/macos/import-signing-certificate.sh
+      - name: Build archive and PKG
+        shell: bash
+        run: |
+          version="${PORTAL_RELEASE_VERSION#v}"
+          bash packaging/macos/build-packages.sh \
+            "$version" \
+            "${{ matrix.target }}" \
+            "target/${{ matrix.target }}/release/portal" \
+            dist
+      - name: Notarize and staple PKG
+        if: env.MACOS_INSTALLER_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        shell: bash
+        run: |
+          pkg="$(find dist -maxdepth 1 -name '*.pkg' -print -quit)"
+          xcrun notarytool submit "$pkg" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-macos-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm
+      - name: Build Portal
+        run: cargo build --workspace --release --locked --target "${{ matrix.target }}"
+      - name: Build archive, DEB, and RPM
+        shell: bash
+        run: |
+          version="${PORTAL_RELEASE_VERSION#v}"
+          bash packaging/linux/build-packages.sh \
+            "$version" \
+            "${{ matrix.target }}" \
+            "target/${{ matrix.target }}/release/portal" \
+            dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-linux-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    if: github.event_name == 'push'
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --title "Portal $GITHUB_REF_NAME"
