@@ -1,11 +1,12 @@
 # Portal
 
-Portal is a cross-platform terminal interface for finding desktop peers on a
-Tailscale network and opening them directly in RustDesk.
+**A portal to any machine, from any terminal.**
 
-It combines asynchronous discovery, active Tailscale reachability checks,
-round-trip latency, favorites and nicknames, and RustDesk desktop or file
-transfer actions in one responsive TUI.
+Portal maps your private device network into a fast, keyboard-driven command
+center. See which machines are reachable, inspect live latency, personalize
+their metadata, and jump directly into remote desktop or file-transfer sessions
+in a few keystrokes. Under the hood, Tailscale provides the private routes and
+RustDesk handles the projection.
 
 ## Requirements
 
@@ -60,16 +61,25 @@ portal connect <name>
 portal share <name>
 portal --dry-run connect <name>
 portal init <name>
+portal setup
 ```
 
 `portal <name>` is shorthand for `portal connect <name>`. `share` opens
 RustDesk file transfer. On Windows, `portal init <name>` previews and optionally
 applies local RustDesk receiving configuration.
 
+`portal setup` checks whether Tailscale and RustDesk are installed. For missing
+dependencies it offers a supported local package manager when one is available,
+the official download page, or the option to skip.
+
 ## Configuration
 
-Portal works without a configuration file. Optional nicknames, tags, favorites,
-notes, executable overrides, and theme colors use TOML:
+Portal works without a configuration file. Select a machine and press `e` to
+edit its nickname, tags, favorite status, and notes without leaving the TUI.
+Changes are written to TOML and displayed in the details panel. Press `t` to
+preview a color theme; applying one makes it the default for future launches.
+
+Executable overrides and manual configuration use the same TOML file:
 
 ```toml
 [executables]
@@ -117,12 +127,6 @@ winget install --id JRSoftware.InnoSetup --exact
 ./packaging/windows/test-installer.ps1 -TestPathRegistration
 ```
 
-## Releases
-
-Pushing a version tag such as `v0.0.1` runs the release workflow, builds native
-Windows, macOS, and Linux artifacts, generates checksums and provenance, and
-creates a draft GitHub Release. See [the release guide](docs/releasing.md).
-
 ## Platform status
 
 - Windows: runtime-tested, including RustDesk provisioning.
@@ -130,6 +134,9 @@ creates a draft GitHub Release. See [the release guide](docs/releasing.md).
   real-machine release validation.
 - Linux: compiled in CI; distribution packages and runtime behavior still need
   clean-machine release validation.
+
+Future networking providers, SSH, and agent-ready remote terminals are tracked
+in the [product roadmap](docs/roadmap.md).
 
 ## Security
 

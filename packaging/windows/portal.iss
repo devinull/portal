@@ -63,10 +63,12 @@ Name: "{group}\Uninstall Portal"; Filename: "{uninstallexe}"; Tasks: startmenu
 
 [Run]
 Filename: "{app}\portal.exe"; Description: "Launch Portal"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent
-Filename: "https://tailscale.com/download/windows"; Description: "Get Tailscale (not detected)"; Flags: shellexec postinstall skipifsilent unchecked; Check: not TailscaleInstalled
-Filename: "https://github.com/rustdesk/rustdesk/releases/latest"; Description: "Get RustDesk (not detected)"; Flags: shellexec postinstall skipifsilent unchecked; Check: not RustDeskInstalled
 
 [Code]
+var
+  TailscalePage, RustDeskPage: TInputOptionWizardPage;
+  WingetPath: String;
+
 function NormalizedPath(const Value: String): String;
 begin
   Result := Trim(Value);
@@ -201,10 +203,134 @@ begin
     FileExists(ExpandConstant('{localappdata}\Programs\RustDesk\rustdesk.exe'));
 end;
 
+function WingetPackageAvailable(const PackageId: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result :=
+    (WingetPath <> '') and
+    Exec(
+      WingetPath,
+      'show --id ' + PackageId +
+        ' --exact --source winget --accept-source-agreements --disable-interactivity',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and
+    (ResultCode = 0);
+end;
+
+function ForceDependencyPages: Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  for Index := 1 to ParamCount do
+    if CompareText(ParamStr(Index), '/FORCEMISSINGDEPENDENCIES') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+procedure AddDependencyChoices(
+  var Page: TInputOptionWizardPage;
+  const ProductName, PackageId: String;
+  const AfterId: Integer);
+begin
+  Page := CreateInputOptionPage(
+    AfterId,
+    ProductName + ' was not detected',
+    'Choose how Portal Setup should help.',
+    'Third-party installation is optional. Portal does not bundle ' + ProductName + '.',
+    True, True);
+  if WingetPackageAvailable(PackageId) then
+    Page.Add('Install ' + ProductName + ' with WinGet');
+  Page.Add('Open the official ' + ProductName + ' download page');
+  Page.Add('Skip for now');
+  Page.SelectedValueIndex := 0;
+end;
+
+procedure InitializeWizard;
+var
+  AfterId: Integer;
+begin
+  if WizardSilent then
+    Exit;
+  WingetPath := FileSearch('winget.exe', GetEnv('PATH'));
+  AfterId := wpSelectTasks;
+  if ForceDependencyPages or (not TailscaleInstalled) then
+  begin
+    AddDependencyChoices(
+      TailscalePage, 'Tailscale', 'Tailscale.Tailscale', AfterId);
+    AfterId := TailscalePage.ID;
+  end;
+  if ForceDependencyPages or (not RustDeskInstalled) then
+    AddDependencyChoices(
+      RustDeskPage, 'RustDesk', 'RustDesk.RustDesk', AfterId);
+end;
+
+procedure OpenOfficialPage(const Url, ProductName: String);
+var
+  ResultCode: Integer;
+begin
+  if not ShellExec('open', Url, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode) then
+    SuppressibleMsgBox(
+      'Could not open the ' + ProductName + ' download page.',
+      mbError, MB_OK, IDOK);
+end;
+
+procedure InstallWithWinget(const PackageId, ProductName: String);
+var
+  ResultCode: Integer;
+begin
+  if not Exec(
+    WingetPath,
+    'install --id ' + PackageId +
+      ' --exact --source winget --accept-source-agreements' +
+      ' --accept-package-agreements --disable-interactivity',
+    '', SW_SHOW, ewWaitUntilTerminated, ResultCode) or
+    (ResultCode <> 0) then
+  begin
+    SuppressibleMsgBox(
+      ProductName + ' was not installed by WinGet. Setup will open the official download page.',
+      mbError, MB_OK, IDOK);
+    if ProductName = 'Tailscale' then
+      OpenOfficialPage('https://tailscale.com/download/windows', ProductName)
+    else
+      OpenOfficialPage('https://github.com/rustdesk/rustdesk/releases/latest', ProductName);
+  end;
+end;
+
+procedure ApplyDependencyChoice(
+  const Page: TInputOptionWizardPage;
+  const PackageId, ProductName, Url: String);
+var
+  HasWingetChoice: Boolean;
+begin
+  if Page = nil then
+    Exit;
+  HasWingetChoice := (Page.CheckListBox.Items.Count = 3);
+  if HasWingetChoice and (Page.SelectedValueIndex = 0) then
+    InstallWithWinget(PackageId, ProductName)
+  else if ((HasWingetChoice and (Page.SelectedValueIndex = 1)) or
+           ((not HasWingetChoice) and (Page.SelectedValueIndex = 0))) then
+    OpenOfficialPage(Url, ProductName);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then
-    AddPortalToPath;
+  if CurStep = ssPostInstall then
+  begin
+    if WizardIsTaskSelected('addtopath') then
+      AddPortalToPath;
+    if not WizardSilent then
+    begin
+      ApplyDependencyChoice(
+        TailscalePage, 'Tailscale.Tailscale', 'Tailscale',
+        'https://tailscale.com/download/windows');
+      ApplyDependencyChoice(
+        RustDeskPage, 'RustDesk.RustDesk', 'RustDesk',
+        'https://github.com/rustdesk/rustdesk/releases/latest');
+    end;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

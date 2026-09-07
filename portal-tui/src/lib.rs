@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use app::{
-    App, AvailabilityState, InputCommand, MessageLevel, ProbeTarget, ThemePickerCommand,
-    input_command, theme_picker_command,
+    App, AvailabilityState, ConfigEditorCommand, InputCommand, MessageLevel, ProbeTarget,
+    ThemePickerCommand, config_editor_command, input_command, theme_picker_command,
 };
 use portal_core::{Action, Device, Portal, ProbeMeasurement, Snapshot};
 use ratatui::DefaultTerminal;
@@ -163,13 +163,50 @@ fn run_loop(
         if event::poll(EVENT_POLL_MAX)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if app.theme_picker_open() {
+                    if app.config_editor_open() {
+                        if let Some(command) = config_editor_command(key) {
+                            needs_redraw = true;
+                            match command {
+                                ConfigEditorCommand::PreviousField => {
+                                    app.select_previous_config_field()
+                                }
+                                ConfigEditorCommand::NextField => app.select_next_config_field(),
+                                ConfigEditorCommand::CursorLeft => app.move_config_cursor_left(),
+                                ConfigEditorCommand::CursorRight => app.move_config_cursor_right(),
+                                ConfigEditorCommand::CursorHome => app.move_config_cursor_home(),
+                                ConfigEditorCommand::CursorEnd => app.move_config_cursor_end(),
+                                ConfigEditorCommand::Insert(character) => {
+                                    app.insert_config_character(character)
+                                }
+                                ConfigEditorCommand::Backspace => app.backspace_config_character(),
+                                ConfigEditorCommand::Delete => app.delete_config_character(),
+                                ConfigEditorCommand::Clear => app.clear_config_field(),
+                                ConfigEditorCommand::Save => {
+                                    save_device_config(app, portal, request_tx)
+                                }
+                                ConfigEditorCommand::Cancel => app.cancel_config_editor(),
+                            }
+                        }
+                    } else if app.theme_picker_open() {
                         if let Some(command) = theme_picker_command(key) {
                             needs_redraw = true;
                             match command {
                                 ThemePickerCommand::Previous => app.select_previous_theme(),
                                 ThemePickerCommand::Next => app.select_next_theme(),
-                                ThemePickerCommand::Apply => app.apply_theme_picker(),
+                                ThemePickerCommand::Apply => {
+                                    if let Some(theme) = app.pending_theme() {
+                                        match portal.set_theme(theme) {
+                                            Ok(()) => app.apply_theme_picker(),
+                                            Err(error) => {
+                                                app.cancel_theme_picker();
+                                                app.set_action_message(
+                                                    MessageLevel::Error,
+                                                    error.to_string(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                                 ThemePickerCommand::Cancel => app.cancel_theme_picker(),
                             }
                         }
@@ -190,6 +227,7 @@ fn run_loop(
                             }
                             InputCommand::CycleSort => app.cycle_sort(),
                             InputCommand::OpenThemePicker => app.open_theme_picker(),
+                            InputCommand::OpenConfigEditor => app.open_config_editor(),
                             InputCommand::Quit => return Ok(()),
                         }
                     }
@@ -198,6 +236,19 @@ fn run_loop(
                 _ => {}
             }
         }
+    }
+}
+
+fn save_device_config(app: &mut App, portal: &Portal, request_tx: &SyncSender<()>) {
+    let Some((device_id, machine_name, hostname, config)) = app.pending_device_config() else {
+        return;
+    };
+    match portal.update_device_config(&machine_name, &hostname, config.clone()) {
+        Ok(()) => {
+            app.commit_config_editor(&device_id, &config);
+            request_refresh(app, request_tx);
+        }
+        Err(error) => app.set_action_message(MessageLevel::Error, error.to_string()),
     }
 }
 

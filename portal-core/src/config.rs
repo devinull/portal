@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::Device;
 use crate::theme::Theme;
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
     pub executables: Executables,
@@ -16,14 +17,14 @@ pub(crate) struct Config {
     pub theme: Theme,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Executables {
     pub tailscale: Option<PathBuf>,
     pub rustdesk: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct DeviceMetadata {
     pub nickname: Option<String>,
@@ -46,6 +47,48 @@ pub enum ConfigError {
     },
     #[error("invalid config at {path}: {message}")]
     Validation { path: PathBuf, message: String },
+    #[error("could not serialize config at {path}: {source}")]
+    Serialize {
+        path: PathBuf,
+        source: toml::ser::Error,
+    },
+    #[error("could not create config directory {path}: {source}")]
+    CreateDirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("could not write config at {path}: {source}")]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+pub(crate) fn save_config(path: &Path, config: &Config) -> Result<(), ConfigError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|source| ConfigError::CreateDirectory {
+        path: parent.to_owned(),
+        source,
+    })?;
+    let source = toml::to_string_pretty(config).map_err(|source| ConfigError::Serialize {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .map_err(|source| ConfigError::Write {
+            path: path.to_owned(),
+            source,
+        })?;
+    file.write_all(source.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|source| ConfigError::Write {
+            path: path.to_owned(),
+            source,
+        })
 }
 
 pub(crate) fn load_config(path: &Path) -> Result<Config, ConfigError> {
@@ -67,7 +110,7 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, ConfigError> {
     Ok(config)
 }
 
-fn validate_config(path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+pub(crate) fn validate_config(path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let mut nicknames = HashSet::new();
     for (hostname, metadata) in &mut config.devices {
         if let Some(nickname) = &metadata.nickname {
@@ -140,7 +183,7 @@ mod tests {
 
     use crate::model::Device;
 
-    use super::{ConfigError, load_config, merge_metadata};
+    use super::{ConfigError, load_config, merge_metadata, save_config};
 
     #[test]
     fn missing_config_is_empty() {
@@ -269,6 +312,39 @@ mod tests {
             load_from("[devices.one]\nnickname = \"Rig\"\n[devices.two]\nnickname = \"rig\"");
 
         assert!(matches!(error, ConfigError::Validation { .. }));
+    }
+
+    #[test]
+    fn save_round_trip_preserves_metadata_executables_and_theme() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("saved").join("config.toml");
+        let mut config = load_ok(
+            r#"
+                [executables]
+                tailscale = "/custom/tailscale"
+
+                [devices.workstation]
+                nickname = "rig"
+                tags = ["primary"]
+                favorite = true
+                notes = "Main"
+            "#,
+        );
+        config.theme = crate::Theme::terminator();
+
+        save_config(&path, &config).unwrap();
+        let saved = load_config(&path).unwrap();
+
+        assert_eq!(saved.theme, crate::Theme::terminator());
+        assert_eq!(
+            saved.devices["workstation"].nickname.as_deref(),
+            Some("rig")
+        );
+        assert!(saved.devices["workstation"].favorite);
+        assert_eq!(
+            saved.executables.tailscale.unwrap().to_string_lossy(),
+            "/custom/tailscale"
+        );
     }
 
     #[test]

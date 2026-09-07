@@ -19,11 +19,18 @@ for an all-users installation. A custom destination can be selected from the
 installer's destination page. Open a new terminal after setup so it receives
 the updated environment.
 
+When Tailscale or RustDesk is missing, interactive setup offers an available
+WinGet package, the product's official download page, or **Skip for now**.
+Portal invokes WinGet directly only after it is selected. RustDesk is not
+currently published through WinGet, so its browser option is used on Windows.
+
 ### macOS
 
 Run the package for your processor. It installs `/usr/local/bin/portal`.
 Tailscale and RustDesk still require their normal interactive macOS setup and
-privacy approvals.
+privacy approvals. Run `portal setup` afterward; when Homebrew is installed it
+offers the `tailscale-app` and `rustdesk` casks, otherwise it offers their
+official download pages.
 
 ### Linux
 
@@ -36,9 +43,15 @@ sudo rpm -i ./portal-<version>-1.<architecture>.rpm
 
 The packages install `/usr/bin/portal`.
 
+Run `portal setup` afterward. Portal offers APT or DNF for Tailscale only when
+the package is already available from a configured repository. It offers
+Flathub for RustDesk only when Flatpak and the Flathub remote are available.
+Otherwise it opens the official installation source. Portal never runs
+`curl | sh`.
+
 ## 2. Install and sign in to Tailscale
 
-Install Tailscale from its official source, authenticate it, and confirm the
+Run `portal setup`, or install Tailscale from its official source, authenticate it, and confirm the
 local client can see the expected peers:
 
 ```text
@@ -50,7 +63,7 @@ RustDesk target.
 
 ## 3. Install and configure RustDesk
 
-Install RustDesk on the controller and every target. Enable direct IP access on
+Run `portal setup`, or install RustDesk on the controller and every target. Enable direct IP access on
 targets. Windows targets can use Portal's preview-first provisioning flow:
 
 ```text
@@ -69,7 +82,9 @@ portal
 
 New peers begin in the checking state. Successful Tailscale probes fill their
 device dot and add current latency. Press `r` to refresh discovery and make all
-peer checks due immediately.
+peer checks due immediately. Select a machine and press `e` to edit its
+nickname, comma-separated tags, favorite status, and notes. Press `t` to preview
+themes; pressing Enter applies the highlighted theme and saves it as the default.
 
 ## Troubleshooting
 

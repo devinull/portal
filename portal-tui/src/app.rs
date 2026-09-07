@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use portal_core::{Device, LocalDevice, ProbeMeasurement, Snapshot, Theme};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use portal_core::{Device, DeviceConfig, LocalDevice, ProbeMeasurement, Snapshot, Theme};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 
 pub(crate) const REACHABLE_PROBE_INTERVAL: Duration = Duration::from_secs(15);
@@ -120,6 +120,47 @@ struct ThemePicker {
     selected: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConfigField {
+    Nickname,
+    Tags,
+    Favorite,
+    Notes,
+}
+
+impl ConfigField {
+    const fn previous(self) -> Self {
+        match self {
+            Self::Nickname => Self::Notes,
+            Self::Tags => Self::Nickname,
+            Self::Favorite => Self::Tags,
+            Self::Notes => Self::Favorite,
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::Nickname => Self::Tags,
+            Self::Tags => Self::Favorite,
+            Self::Favorite => Self::Notes,
+            Self::Notes => Self::Nickname,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConfigEditor {
+    pub(crate) device_id: String,
+    pub(crate) machine_name: String,
+    pub(crate) hostname: String,
+    pub(crate) field: ConfigField,
+    pub(crate) nickname: String,
+    pub(crate) tags: String,
+    pub(crate) favorite: bool,
+    pub(crate) notes: String,
+    pub(crate) cursor: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StatusMessage {
     pub(crate) level: MessageLevel,
@@ -144,6 +185,7 @@ pub(crate) struct App {
     probe_worker_disconnected_reported: bool,
     active_theme: usize,
     theme_picker: Option<ThemePicker>,
+    config_editor: Option<ConfigEditor>,
 }
 
 impl Default for App {
@@ -154,11 +196,34 @@ impl Default for App {
 
 impl App {
     pub(crate) fn new(configured_theme: Theme) -> Self {
-        let configured_name = if configured_theme == Theme::portal() {
-            "Portal"
-        } else {
-            "Configured"
-        };
+        let mut themes = vec![
+            ThemeOption {
+                name: "Portal",
+                theme: Theme::portal(),
+            },
+            ThemeOption {
+                name: "Hacker",
+                theme: Theme::hacker(),
+            },
+            ThemeOption {
+                name: "Terminator",
+                theme: Theme::terminator(),
+            },
+            ThemeOption {
+                name: "Cyber Cyan",
+                theme: Theme::cyber_cyan(),
+            },
+        ];
+        let active_theme = themes
+            .iter()
+            .position(|option| option.theme == configured_theme)
+            .unwrap_or_else(|| {
+                themes.push(ThemeOption {
+                    name: "Configured",
+                    theme: configured_theme,
+                });
+                themes.len() - 1
+            });
         Self {
             local_device: None,
             devices: Vec::new(),
@@ -171,23 +236,11 @@ impl App {
             discovery_health: DiscoveryHealth::Unknown,
             availability: HashMap::new(),
             probe_in_flight: None,
-            themes: vec![
-                ThemeOption {
-                    name: configured_name,
-                    theme: configured_theme,
-                },
-                ThemeOption {
-                    name: "Hacker",
-                    theme: Theme::hacker(),
-                },
-                ThemeOption {
-                    name: "Cyber Cyan",
-                    theme: Theme::cyber_cyan(),
-                },
-            ],
+            themes,
             probe_worker_disconnected_reported: false,
-            active_theme: 0,
+            active_theme,
             theme_picker: None,
+            config_editor: None,
         }
     }
 
@@ -232,8 +285,176 @@ impl App {
         }
     }
 
+    pub(crate) fn pending_theme(&self) -> Option<Theme> {
+        self.theme_picker
+            .map(|picker| self.themes[picker.selected].theme)
+    }
+
     pub(crate) fn cancel_theme_picker(&mut self) {
         self.theme_picker = None;
+    }
+
+    pub(crate) fn config_editor(&self) -> Option<&ConfigEditor> {
+        self.config_editor.as_ref()
+    }
+
+    pub(crate) fn config_editor_open(&self) -> bool {
+        self.config_editor.is_some()
+    }
+
+    pub(crate) fn open_config_editor(&mut self) {
+        let Some(device) = self.selected_device() else {
+            self.set_action_message(MessageLevel::Warning, "No device selected");
+            return;
+        };
+        self.config_editor = Some(ConfigEditor {
+            device_id: device.id.clone(),
+            machine_name: device.machine_name.clone(),
+            hostname: device.hostname.clone(),
+            field: ConfigField::Nickname,
+            nickname: device.nickname.clone().unwrap_or_default(),
+            tags: device.tags.join(", "),
+            favorite: device.favorite,
+            notes: device.notes.clone().unwrap_or_default(),
+            cursor: device
+                .nickname
+                .as_ref()
+                .map_or(0, |value| value.chars().count()),
+        });
+    }
+
+    pub(crate) fn cancel_config_editor(&mut self) {
+        self.config_editor = None;
+    }
+
+    pub(crate) fn select_previous_config_field(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.field = editor.field.previous();
+            editor.cursor = editor.active_text().map_or(0, |text| text.chars().count());
+        }
+    }
+
+    pub(crate) fn select_next_config_field(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.field = editor.field.next();
+            editor.cursor = editor.active_text().map_or(0, |text| text.chars().count());
+        }
+    }
+
+    pub(crate) fn move_config_cursor_left(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.cursor = editor.cursor.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn move_config_cursor_right(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            let length = editor.active_text().map_or(0, |text| text.chars().count());
+            editor.cursor = editor.cursor.saturating_add(1).min(length);
+        }
+    }
+
+    pub(crate) fn move_config_cursor_home(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.cursor = 0;
+        }
+    }
+
+    pub(crate) fn move_config_cursor_end(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.cursor = editor.active_text().map_or(0, |text| text.chars().count());
+        }
+    }
+
+    pub(crate) fn insert_config_character(&mut self, character: char) {
+        if let Some(editor) = &mut self.config_editor {
+            if editor.field == ConfigField::Favorite {
+                if character == ' ' {
+                    editor.favorite = !editor.favorite;
+                }
+                return;
+            }
+            editor.edit_active_text(|characters, cursor| {
+                characters.insert(cursor, character);
+                cursor + 1
+            });
+        }
+    }
+
+    pub(crate) fn backspace_config_character(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.edit_active_text(|characters, cursor| {
+                if cursor > 0 {
+                    characters.remove(cursor - 1);
+                    cursor - 1
+                } else {
+                    cursor
+                }
+            });
+        }
+    }
+
+    pub(crate) fn delete_config_character(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.edit_active_text(|characters, cursor| {
+                if cursor < characters.len() {
+                    characters.remove(cursor);
+                }
+                cursor
+            });
+        }
+    }
+
+    pub(crate) fn clear_config_field(&mut self) {
+        if let Some(editor) = &mut self.config_editor {
+            editor.edit_active_text(|characters, _| {
+                characters.clear();
+                0
+            });
+        }
+    }
+
+    pub(crate) fn pending_device_config(&self) -> Option<(String, String, String, DeviceConfig)> {
+        let editor = self.config_editor.as_ref()?;
+        let mut tags = Vec::new();
+        for tag in editor
+            .tags
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+        {
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_owned());
+            }
+        }
+        Some((
+            editor.device_id.clone(),
+            editor.machine_name.clone(),
+            editor.hostname.clone(),
+            DeviceConfig {
+                nickname: nonempty(&editor.nickname),
+                tags,
+                favorite: editor.favorite,
+                notes: nonempty(&editor.notes),
+            },
+        ))
+    }
+
+    pub(crate) fn commit_config_editor(&mut self, device_id: &str, config: &DeviceConfig) {
+        if let Some(device) = self
+            .devices
+            .iter_mut()
+            .find(|device| device.id == device_id)
+        {
+            device.nickname.clone_from(&config.nickname);
+            device.tags.clone_from(&config.tags);
+            device.favorite = config.favorite;
+            device.notes.clone_from(&config.notes);
+        }
+        self.config_editor = None;
+        sort_devices(&mut self.devices, self.sort_mode, &self.availability);
+        self.restore_selection(Some(device_id), None);
+        self.set_action_message(MessageLevel::Info, "Saved device configuration");
     }
     pub(crate) fn selected_device(&self) -> Option<&Device> {
         self.table_state
@@ -484,6 +705,37 @@ impl App {
     }
 }
 
+impl ConfigEditor {
+    fn active_text(&self) -> Option<&str> {
+        match self.field {
+            ConfigField::Nickname => Some(&self.nickname),
+            ConfigField::Tags => Some(&self.tags),
+            ConfigField::Favorite => None,
+            ConfigField::Notes => Some(&self.notes),
+        }
+    }
+
+    fn edit_active_text(&mut self, edit: impl FnOnce(&mut Vec<char>, usize) -> usize) {
+        let field = self.field;
+        let cursor = self.cursor;
+        let text = match field {
+            ConfigField::Nickname => &mut self.nickname,
+            ConfigField::Tags => &mut self.tags,
+            ConfigField::Favorite => return,
+            ConfigField::Notes => &mut self.notes,
+        };
+        let mut characters: Vec<char> = text.chars().collect();
+        let cursor = cursor.min(characters.len());
+        self.cursor = edit(&mut characters, cursor);
+        *text = characters.into_iter().collect();
+    }
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputCommand {
     Previous,
@@ -493,6 +745,7 @@ pub(crate) enum InputCommand {
     Refresh,
     CycleSort,
     OpenThemePicker,
+    OpenConfigEditor,
     Quit,
 }
 
@@ -509,7 +762,52 @@ pub(crate) fn input_command(event: KeyEvent) -> Option<InputCommand> {
         KeyCode::Char('r') => Some(InputCommand::Refresh),
         KeyCode::Tab => Some(InputCommand::CycleSort),
         KeyCode::Char('t') => Some(InputCommand::OpenThemePicker),
+        KeyCode::Char('e') => Some(InputCommand::OpenConfigEditor),
         KeyCode::Char('q') | KeyCode::Esc => Some(InputCommand::Quit),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConfigEditorCommand {
+    PreviousField,
+    NextField,
+    CursorLeft,
+    CursorRight,
+    CursorHome,
+    CursorEnd,
+    Insert(char),
+    Backspace,
+    Delete,
+    Clear,
+    Save,
+    Cancel,
+}
+
+pub(crate) fn config_editor_command(event: KeyEvent) -> Option<ConfigEditorCommand> {
+    if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return None;
+    }
+    match (event.code, event.modifiers) {
+        (KeyCode::BackTab, _) => Some(ConfigEditorCommand::PreviousField),
+        (KeyCode::Tab | KeyCode::Down, _) => Some(ConfigEditorCommand::NextField),
+        (KeyCode::Up, _) => Some(ConfigEditorCommand::PreviousField),
+        (KeyCode::Left, _) => Some(ConfigEditorCommand::CursorLeft),
+        (KeyCode::Right, _) => Some(ConfigEditorCommand::CursorRight),
+        (KeyCode::Home, _) => Some(ConfigEditorCommand::CursorHome),
+        (KeyCode::End, _) => Some(ConfigEditorCommand::CursorEnd),
+        (KeyCode::Backspace, _) => Some(ConfigEditorCommand::Backspace),
+        (KeyCode::Delete, _) => Some(ConfigEditorCommand::Delete),
+        (KeyCode::Char('u'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(ConfigEditorCommand::Clear)
+        }
+        (KeyCode::Enter, _) => Some(ConfigEditorCommand::Save),
+        (KeyCode::Esc, _) => Some(ConfigEditorCommand::Cancel),
+        (KeyCode::Char(character), modifiers)
+            if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            Some(ConfigEditorCommand::Insert(character))
+        }
         _ => None,
     }
 }
@@ -596,13 +894,14 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
 
-    use portal_core::{Device, ProbeMeasurement, Snapshot, Theme};
+    use portal_core::{Device, DeviceConfig, ProbeMeasurement, Snapshot, Theme};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     use super::{
-        App, AvailabilityState, DiscoveryHealth, InputCommand, MessageLevel, MessageSource,
-        REACHABLE_PROBE_INTERVAL, RETRY_PROBE_INTERVAL, SortMode, ThemePickerCommand,
-        format_last_connected, input_command, theme_picker_command,
+        App, AvailabilityState, ConfigEditorCommand, DiscoveryHealth, InputCommand, MessageLevel,
+        MessageSource, REACHABLE_PROBE_INTERVAL, RETRY_PROBE_INTERVAL, SortMode,
+        ThemePickerCommand, config_editor_command, format_last_connected, input_command,
+        theme_picker_command,
     };
 
     #[test]
@@ -917,7 +1216,7 @@ mod tests {
                 .iter()
                 .map(|theme| theme.name)
                 .collect::<Vec<_>>(),
-            ["Portal", "Hacker", "Cyber Cyan"]
+            ["Portal", "Hacker", "Terminator", "Cyber Cyan"]
         );
 
         app.open_theme_picker();
@@ -935,6 +1234,53 @@ mod tests {
         assert_eq!(app.visible_theme(), Theme::cyber_cyan());
         assert!(!app.theme_picker_open());
         assert!(app.message.as_ref().unwrap().text.contains("Cyber Cyan"));
+    }
+
+    #[test]
+    fn config_editor_builds_and_commits_device_metadata() {
+        let mut configured = device("one", "workstation", true, None);
+        configured.nickname = Some("old".to_owned());
+        configured.tags = vec!["one".to_owned()];
+        let mut app = app_with(vec![configured]);
+
+        app.open_config_editor();
+        app.clear_config_field();
+        for character in "rig".chars() {
+            app.insert_config_character(character);
+        }
+        app.select_next_config_field();
+        app.clear_config_field();
+        for character in "primary, desktop, primary".chars() {
+            app.insert_config_character(character);
+        }
+        app.select_next_config_field();
+        app.insert_config_character(' ');
+        app.select_next_config_field();
+        for character in "Main machine".chars() {
+            app.insert_config_character(character);
+        }
+
+        let (id, machine_name, hostname, metadata) = app.pending_device_config().unwrap();
+        assert_eq!(id, "one");
+        assert_eq!(machine_name, "workstation");
+        assert_eq!(hostname, "workstation");
+        assert_eq!(
+            metadata,
+            DeviceConfig {
+                nickname: Some("rig".to_owned()),
+                tags: vec!["primary".to_owned(), "desktop".to_owned()],
+                favorite: true,
+                notes: Some("Main machine".to_owned()),
+            }
+        );
+
+        app.commit_config_editor(&id, &metadata);
+        let device = app.selected_device().unwrap();
+        assert_eq!(device.nickname.as_deref(), Some("rig"));
+        assert_eq!(device.tags, ["primary", "desktop"]);
+        assert!(device.favorite);
+        assert_eq!(device.notes.as_deref(), Some("Main machine"));
+        assert!(!app.config_editor_open());
     }
 
     #[test]
@@ -968,6 +1314,10 @@ mod tests {
             Some(InputCommand::OpenThemePicker)
         );
         assert_eq!(
+            command(KeyCode::Char('e'), KeyEventKind::Press),
+            Some(InputCommand::OpenConfigEditor)
+        );
+        assert_eq!(
             command(KeyCode::Esc, KeyEventKind::Press),
             Some(InputCommand::Quit)
         );
@@ -997,6 +1347,26 @@ mod tests {
     }
 
     #[test]
+    fn config_editor_key_mapping_is_contextual() {
+        assert_eq!(
+            editor_command(KeyCode::Tab, KeyModifiers::NONE),
+            Some(ConfigEditorCommand::NextField)
+        );
+        assert_eq!(
+            editor_command(KeyCode::Char('x'), KeyModifiers::NONE),
+            Some(ConfigEditorCommand::Insert('x'))
+        );
+        assert_eq!(
+            editor_command(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Some(ConfigEditorCommand::Clear)
+        );
+        assert_eq!(
+            editor_command(KeyCode::Enter, KeyModifiers::NONE),
+            Some(ConfigEditorCommand::Save)
+        );
+    }
+
+    #[test]
     fn relative_time_labels_cover_boundaries_and_future_values() {
         assert_eq!(format_last_connected(None, 100), "never");
         assert_eq!(format_last_connected(Some(100), 100), "just now");
@@ -1016,6 +1386,10 @@ mod tests {
             KeyModifiers::NONE,
             KeyEventKind::Press,
         ))
+    }
+
+    fn editor_command(code: KeyCode, modifiers: KeyModifiers) -> Option<ConfigEditorCommand> {
+        config_editor_command(KeyEvent::new(code, modifiers))
     }
 
     fn app_with(devices: Vec<Device>) -> App {

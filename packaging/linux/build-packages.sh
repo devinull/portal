@@ -46,7 +46,7 @@ Section: utils
 Priority: optional
 Architecture: $deb_arch
 Maintainer: Portal contributors <devinull@users.noreply.github.com>
-Description: Reach Tailscale devices through RustDesk
+Description: A portal to any machine, from any terminal
  Portal provides an interactive terminal interface for desktop peers on a
  Tailscale network and opens RustDesk desktop or file-transfer sessions.
 EOF

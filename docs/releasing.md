@@ -65,6 +65,10 @@ stable consumer release.
 
 4. Run the interactive Windows installer and verify:
 
+   Use `/FORCEMISSINGDEPENDENCIES` on a development machine where both products
+   are already installed to display the dependency-choice pages without
+   uninstalling either product.
+
    - neutral dark styling remains legible at normal and high DPI;
    - the scope page offers current-user and all-users installation;
    - current-user setup defaults to `%LOCALAPPDATA%\Programs\Portal` without
@@ -76,6 +80,8 @@ stable consumer release.
      and works in a new terminal;
    - Start menu creation follows the selected option;
    - only missing Tailscale or RustDesk download links are offered;
+   - missing dependencies offer a verified WinGet package when available,
+     alongside official browser and skip choices;
    - upgrade and uninstall preserve unrelated files and PATH entries.
 
 5. Commit the version and release notes.

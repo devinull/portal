@@ -6,11 +6,13 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use portal_core::{Action, Device, Launch, Portal, ProvisionPlan, resolve};
 
+mod setup;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "portal",
     version,
-    about = "Reach Tailscale devices through RustDesk"
+    about = "A portal to any machine, from any terminal"
 )]
 struct Cli {
     /// Read address-book configuration from this path.
@@ -45,6 +47,8 @@ enum Command {
     /// Prepare RustDesk provisioning.
     #[command(alias = "provision")]
     Init { target: String },
+    /// Check dependencies and offer safe platform installation options.
+    Setup,
 }
 
 fn main() {
@@ -97,6 +101,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             if outcome.verified {
                 println!("RustDesk service, direct access, and tailnet whitelist verified.");
             }
+            return Ok(());
+        }
+        (Some(Command::Setup), None) => {
+            let portal = Portal::load(cli.config.as_deref())?;
+            setup::run(&portal, cli.dry_run)?;
             return Ok(());
         }
         (None, None) => {
@@ -291,6 +300,13 @@ mod tests {
                 Some(Command::Init { target }) if target == "rig"
             ));
         }
+    }
+
+    #[test]
+    fn parses_dependency_setup() {
+        let cli = Cli::try_parse_from(["portal", "setup"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Setup)));
+        assert!(cli.target.is_none());
     }
 
     #[test]

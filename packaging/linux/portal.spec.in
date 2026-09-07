@@ -1,7 +1,7 @@
 Name:           portal
 Version:        @VERSION@
 Release:        1%{?dist}
-Summary:        Reach Tailscale devices through RustDesk
+Summary:        A portal to any machine, from any terminal
 License:        MIT
 URL:            https://github.com/devinull/portal
 Source0:        portal

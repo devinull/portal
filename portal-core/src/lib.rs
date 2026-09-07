@@ -10,12 +10,15 @@ pub mod tailscale;
 mod theme;
 
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::{collections::HashSet, net::IpAddr};
 
 use directories::ProjectDirs;
 use thiserror::Error;
 
-use config::{Config, ConfigError, load_config, merge_metadata};
+use config::{
+    Config, ConfigError, DeviceMetadata, load_config, merge_metadata, save_config, validate_config,
+};
 pub use model::{Action, Device, Launch, LocalDevice};
 pub use probe::{ProbeError, ProbeMeasurement};
 pub use rustdesk::{
@@ -42,6 +45,8 @@ pub enum PortalError {
     Provision(#[from] ProvisionError),
     #[error("could not determine platform config and local-data directories")]
     ProjectDirectoriesUnavailable,
+    #[error("Portal configuration lock is unavailable")]
+    ConfigLock,
 }
 
 #[derive(Debug)]
@@ -52,8 +57,23 @@ pub struct Snapshot {
 }
 
 pub struct Portal {
-    config: Config,
+    config: RwLock<Config>,
+    config_path: PathBuf,
     state_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeviceConfig {
+    pub nickname: Option<String>,
+    pub tags: Vec<String>,
+    pub favorite: bool,
+    pub notes: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DependencyStatus {
+    pub tailscale: bool,
+    pub rustdesk: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,7 +163,11 @@ impl Portal {
             .unwrap_or_else(|| project_dirs.config_dir().join("config.toml"));
         let state_path = project_dirs.data_local_dir().join("state.json");
         let config = load_config(&config_path)?;
-        Ok(Self { config, state_path })
+        Ok(Self {
+            config: RwLock::new(config),
+            config_path,
+            state_path,
+        })
     }
 
     pub fn snapshot(&self) -> Result<Vec<Device>, PortalError> {
@@ -152,13 +176,65 @@ impl Portal {
 
     #[must_use]
     pub fn theme(&self) -> Theme {
-        self.config.theme
+        self.config
+            .read()
+            .map_or_else(|_| Theme::default(), |config| config.theme)
+    }
+
+    pub fn set_theme(&self, theme: Theme) -> Result<(), PortalError> {
+        self.update_config(|config| config.theme = theme)
+    }
+
+    pub fn dependency_status(&self) -> Result<DependencyStatus, PortalError> {
+        let config = self.config.read().map_err(|_| PortalError::ConfigLock)?;
+        Ok(DependencyStatus {
+            tailscale: platform::resolve_executable(
+                "tailscale",
+                config.executables.tailscale.as_deref(),
+            )
+            .is_ok(),
+            rustdesk: platform::resolve_executable(
+                "rustdesk",
+                config.executables.rustdesk.as_deref(),
+            )
+            .is_ok(),
+        })
+    }
+
+    pub fn update_device_config(
+        &self,
+        machine_name: &str,
+        hostname: &str,
+        metadata: DeviceConfig,
+    ) -> Result<(), PortalError> {
+        let machine_name = machine_name.to_owned();
+        let hostname = hostname.to_owned();
+        self.update_config(move |config| {
+            config.devices.retain(|key, _| {
+                !key.eq_ignore_ascii_case(&machine_name) && !key.eq_ignore_ascii_case(&hostname)
+            });
+            let metadata = DeviceMetadata {
+                nickname: metadata.nickname,
+                tags: metadata.tags,
+                favorite: metadata.favorite,
+                notes: metadata.notes,
+            };
+            if metadata.nickname.is_some()
+                || !metadata.tags.is_empty()
+                || metadata.favorite
+                || metadata.notes.is_some()
+            {
+                config.devices.insert(machine_name, metadata);
+            }
+        })
     }
 
     pub fn snapshot_with_warnings(&self) -> Result<Snapshot, PortalError> {
-        let discovered = discover_snapshot(self.config.executables.tailscale.as_deref())?;
+        let config = self.config.read().map_err(|_| PortalError::ConfigLock)?;
+        let discovered = discover_snapshot(config.executables.tailscale.as_deref())?;
         let mut devices = discovered.devices;
-        merge_metadata(&mut devices, &self.config);
+        merge_metadata(&mut devices, &config);
+        drop(config);
         let (state, warning) = load_state(&self.state_path);
         merge_state(&mut devices, &state);
         Ok(Snapshot {
@@ -169,15 +245,23 @@ impl Portal {
     }
 
     pub fn probe(&self, device: &Device) -> Result<ProbeMeasurement, ProbeError> {
-        probe::probe(
-            self.config.executables.tailscale.as_deref(),
-            device.preferred_ip,
-        )
+        let executable = self
+            .config
+            .read()
+            .ok()
+            .and_then(|config| config.executables.tailscale.clone());
+        probe::probe(executable.as_deref(), device.preferred_ip)
     }
 
     pub fn launch_spec(&self, action: Action, device: &Device) -> Result<Launch, PortalError> {
-        rustdesk::launch_spec(self.config.executables.rustdesk.as_deref(), action, device)
-            .map_err(PortalError::from)
+        let executable = self
+            .config
+            .read()
+            .map_err(|_| PortalError::ConfigLock)?
+            .executables
+            .rustdesk
+            .clone();
+        rustdesk::launch_spec(executable.as_deref(), action, device).map_err(PortalError::from)
     }
 
     pub fn launch_with_warnings(
@@ -194,8 +278,14 @@ impl Portal {
     }
 
     pub fn local_provision_plan(&self) -> Result<ProvisionPlan, PortalError> {
-        rustdesk::local_provision_plan(self.config.executables.rustdesk.as_deref())
-            .map_err(PortalError::from)
+        let executable = self
+            .config
+            .read()
+            .map_err(|_| PortalError::ConfigLock)?
+            .executables
+            .rustdesk
+            .clone();
+        rustdesk::local_provision_plan(executable.as_deref()).map_err(PortalError::from)
     }
 
     pub fn apply_local_provision_plan(
@@ -204,12 +294,89 @@ impl Portal {
     ) -> Result<ProvisionOutcome, PortalError> {
         rustdesk::apply_local_provision_plan(plan).map_err(PortalError::from)
     }
+
+    fn update_config(&self, update: impl FnOnce(&mut Config)) -> Result<(), PortalError> {
+        let mut current = self.config.write().map_err(|_| PortalError::ConfigLock)?;
+        let mut candidate = current.clone();
+        update(&mut candidate);
+        validate_config(&self.config_path, &mut candidate)?;
+        save_config(&self.config_path, &candidate)?;
+        *current = candidate;
+        Ok(())
+    }
 }
 
 /// Returns the current Portal core release version.
 #[must_use]
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(test)]
+mod config_update_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use crate::{DeviceConfig, Portal, Theme};
+
+    #[test]
+    fn device_and_theme_updates_persist_to_toml() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let portal = Portal::load(Some(&path)).unwrap();
+
+        portal
+            .update_device_config(
+                "workstation",
+                "workstation.example.test",
+                DeviceConfig {
+                    nickname: Some("rig".to_owned()),
+                    tags: vec!["primary".to_owned()],
+                    favorite: true,
+                    notes: Some("Main".to_owned()),
+                },
+            )
+            .unwrap();
+        portal.set_theme(Theme::terminator()).unwrap();
+
+        let source = fs::read_to_string(&path).unwrap();
+        assert!(source.contains("[devices.workstation]"));
+        assert!(source.contains("nickname = \"rig\""));
+        assert!(source.contains("accent = \"#FF1717\""));
+        let reloaded = Portal::load(Some(&path)).unwrap();
+        assert_eq!(reloaded.theme(), Theme::terminator());
+    }
+
+    #[test]
+    fn empty_device_update_removes_stale_table() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let portal = Portal::load(Some(&path)).unwrap();
+        portal
+            .update_device_config(
+                "workstation",
+                "workstation.example.test",
+                DeviceConfig {
+                    nickname: Some("rig".to_owned()),
+                    ..DeviceConfig::default()
+                },
+            )
+            .unwrap();
+        portal
+            .update_device_config(
+                "workstation",
+                "workstation.example.test",
+                DeviceConfig::default(),
+            )
+            .unwrap();
+
+        assert!(
+            !fs::read_to_string(path)
+                .unwrap()
+                .contains("devices.workstation")
+        );
+    }
 }
 
 #[cfg(test)]

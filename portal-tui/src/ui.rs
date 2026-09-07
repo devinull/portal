@@ -8,8 +8,8 @@ use ratatui::widgets::{
 };
 
 use crate::app::{
-    App, Availability, AvailabilityState, DiscoveryHealth, MessageLevel, MessageSource,
-    ThemeOption, format_last_connected,
+    App, Availability, AvailabilityState, ConfigField, DiscoveryHealth, MessageLevel,
+    MessageSource, ThemeOption, format_last_connected,
 };
 
 const MINIMUM_WIDTH: u16 = 48;
@@ -37,6 +37,8 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, theme: Theme, now: u6
     render_footer(frame, vertical[4], app, theme);
     if app.theme_picker_open() {
         render_theme_picker(frame, app, theme);
+    } else if app.config_editor_open() {
+        render_config_editor(frame, app, theme);
     }
 }
 
@@ -333,7 +335,7 @@ fn render_details(
         )),
         Line::from(""),
         detail_line("machine", &device.machine_name, theme),
-        detail_line("host OS", &device.hostname, theme),
+        detail_line("hostname", &device.hostname, theme),
     ];
     if let Some(dns_name) = &device.dns_name {
         lines.push(detail_line("dns", dns_name, theme));
@@ -342,15 +344,27 @@ fn render_details(
         detail_line("address", &device.preferred_ip.to_string(), theme),
         detail_line("os", &device.os, theme),
     ]);
-    if !device.tags.is_empty() {
-        lines.push(detail_line("tags", &device.tags.join(" · "), theme));
-    }
-    if device.favorite {
-        lines.push(detail_line("favorite", "yes", theme));
-    }
-    if let Some(notes) = &device.notes {
-        lines.push(detail_line("notes", notes, theme));
-    }
+    lines.push(detail_line(
+        "nickname",
+        device.nickname.as_deref().unwrap_or("—"),
+        theme,
+    ));
+    let tags = if device.tags.is_empty() {
+        "—".to_owned()
+    } else {
+        device.tags.join(" · ")
+    };
+    lines.push(detail_line("tags", &tags, theme));
+    lines.push(detail_line(
+        "favorite",
+        if device.favorite { "yes" } else { "no" },
+        theme,
+    ));
+    lines.push(detail_line(
+        "notes",
+        device.notes.as_deref().unwrap_or("—"),
+        theme,
+    ));
     lines.push(detail_line(
         "last used",
         &format_last_connected(device.last_connected_at, now),
@@ -410,6 +424,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Span::styled(" refresh  ", muted),
             Span::styled("t", accent),
             Span::styled(" theme  ", muted),
+            Span::styled("e", accent),
+            Span::styled(" edit  ", muted),
             Span::styled("q", accent),
             Span::styled(" quit", muted),
         ]);
@@ -431,8 +447,124 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     }
 }
 
+fn render_config_editor(frame: &mut Frame<'_>, app: &App, theme: Theme) {
+    let Some(editor) = app.config_editor() else {
+        return;
+    };
+    let area = centered_popup(frame.area(), 68, 13);
+    frame.render_widget(Clear, area);
+    let title = format!(" configure {} ", editor.machine_name);
+    let block = panel(&title, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::vertical([Constraint::Length(6), Constraint::Min(3)]).split(inner);
+    let active = editor.field;
+    let items = [
+        config_item(
+            "nickname",
+            &editor.nickname,
+            active == ConfigField::Nickname,
+            editor.cursor,
+            theme,
+        ),
+        config_item(
+            "tags",
+            &editor.tags,
+            active == ConfigField::Tags,
+            editor.cursor,
+            theme,
+        ),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("{:<10}", "favorite"),
+                Style::default().fg(color(theme.muted)),
+            ),
+            Span::styled(
+                if editor.favorite { "[x] yes" } else { "[ ] no" },
+                Style::default().fg(color(theme.foreground)),
+            ),
+        ])),
+        config_item(
+            "notes",
+            &editor.notes,
+            active == ConfigField::Notes,
+            editor.cursor,
+            theme,
+        ),
+    ];
+    let selected = match active {
+        ConfigField::Nickname => 0,
+        ConfigField::Tags => 1,
+        ConfigField::Favorite => 2,
+        ConfigField::Notes => 3,
+    };
+    let mut state = ListState::default().with_selected(Some(selected));
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(color(theme.background))
+                .bg(color(theme.accent))
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(base_style(theme));
+    frame.render_stateful_widget(list, rows[0], &mut state);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("tab/↑/↓", Style::default().fg(color(theme.accent))),
+                Span::styled(" field  ", Style::default().fg(color(theme.muted))),
+                Span::styled("space", Style::default().fg(color(theme.accent))),
+                Span::styled(" toggle favorite", Style::default().fg(color(theme.muted))),
+            ]),
+            Line::from(vec![
+                Span::styled("enter", Style::default().fg(color(theme.accent))),
+                Span::styled(" save  ", Style::default().fg(color(theme.muted))),
+                Span::styled("ctrl+u", Style::default().fg(color(theme.accent))),
+                Span::styled(" clear  ", Style::default().fg(color(theme.muted))),
+                Span::styled("esc", Style::default().fg(color(theme.accent))),
+                Span::styled(" cancel", Style::default().fg(color(theme.muted))),
+            ]),
+            Line::from(Span::styled(
+                "Separate tags with commas",
+                Style::default().fg(color(theme.muted)),
+            )),
+        ])
+        .style(base_style(theme)),
+        rows[1],
+    );
+}
+
+fn config_item(
+    label: &str,
+    value: &str,
+    active: bool,
+    cursor: usize,
+    theme: Theme,
+) -> ListItem<'static> {
+    let value = if active {
+        with_cursor(value, cursor)
+    } else if value.is_empty() {
+        "—".to_owned()
+    } else {
+        value.to_owned()
+    };
+    ListItem::new(Line::from(vec![
+        Span::styled(
+            format!("{label:<10}"),
+            Style::default().fg(color(theme.muted)),
+        ),
+        Span::styled(value, Style::default().fg(color(theme.foreground))),
+    ]))
+}
+
+fn with_cursor(value: &str, cursor: usize) -> String {
+    let mut characters: Vec<char> = value.chars().collect();
+    characters.insert(cursor.min(characters.len()), '│');
+    characters.into_iter().collect()
+}
+
 fn render_theme_picker(frame: &mut Frame<'_>, app: &App, theme: Theme) {
-    let area = centered_popup(frame.area(), 44, 9);
+    let area = centered_popup(frame.area(), 44, 11);
     frame.render_widget(Clear, area);
     let block = panel(" themes ", theme);
     let inner = block.inner(area);
@@ -645,7 +777,7 @@ mod tests {
         let mut app = populated_app();
         let stacked = render_text(&mut app, 80, 24);
         assert!(stacked.contains("details"));
-        assert!(stacked.contains("host OS"));
+        assert!(stacked.contains("hostname"));
         assert!(stacked.contains("24 ms"));
         assert!(!stacked.contains("LATENCY"));
 
@@ -711,7 +843,12 @@ mod tests {
 
     #[test]
     fn status_dots_and_selected_row_use_theme_colors() {
-        for theme in [Theme::portal(), Theme::hacker(), Theme::cyber_cyan()] {
+        for theme in [
+            Theme::portal(),
+            Theme::hacker(),
+            Theme::terminator(),
+            Theme::cyber_cyan(),
+        ] {
             let mut app = populated_app();
             let backend = TestBackend::new(120, 30);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -816,6 +953,7 @@ mod tests {
         assert!(text.contains("themes"));
         assert!(text.contains("Portal"));
         assert!(text.contains("Hacker"));
+        assert!(text.contains("Terminator"));
         assert!(text.contains("Cyber Cyan"));
         assert!(text.contains("preview"));
         assert!(text.contains("enter apply"));
@@ -826,6 +964,19 @@ mod tests {
                 .iter()
                 .any(|cell| cell.bg == color(theme.accent))
         );
+    }
+
+    #[test]
+    fn config_editor_renders_machine_fields_and_help() {
+        let mut app = populated_app();
+        app.open_config_editor();
+        let text = render_text(&mut app, 100, 30);
+
+        assert!(text.contains("configure studio-pc"));
+        assert!(text.contains("nickname"));
+        assert!(text.contains("favorite"));
+        assert!(text.contains("Separate tags with commas"));
+        assert!(text.contains("enter save"));
     }
 
     fn render_text(app: &mut App, width: u16, height: u16) -> String {

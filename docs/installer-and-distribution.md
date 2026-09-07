@@ -37,7 +37,9 @@ Portal v0.0.1 uses an Inno Setup EXE named
 Local AppData and elevated all-users installation under Program Files, optional
 scope-appropriate `PATH` registration, Start menu shortcuts, upgrades, and
 uninstallation. Missing Tailscale or RustDesk installations are detected and
-offered official download links; their installers are not bundled or executed.
+offered an available WinGet package, an official download link, or a skip
+choice. Third-party binaries are never bundled, and package managers run only
+after explicit selection.
 
 An MSI or prerequisite bootstrapper may be considered later if managed
 deployment or verified dependency automation becomes a real requirement. It is
@@ -156,7 +158,7 @@ Use these channels in order:
 
 ## 3. Shared prerequisite model
 
-Installer checks and the future `portal setup` or `portal doctor` commands should
+Installer checks and the `portal setup` command should
 share core detection code. Frontends may render the result differently, but they
 must not implement their own parsing or platform rules.
 
@@ -415,10 +417,11 @@ describes tagged releases and attached binary assets.
 
 ## 9. Implementation phases
 
-### Phase A: shared diagnostics
+### Phase A: shared diagnostics and setup
 
 - Add pure platform-specific discovery data and shared readiness states to core.
-- Add `portal setup` with read-only checks and official links.
+- Maintain `portal setup` with read-only checks plus explicit package-manager,
+  official-link, and skip choices.
 - Keep `portal doctor` focused on richer diagnostics if both commands are later
   retained; `setup` is action-oriented, while `doctor` explains problems.
 - Add sanitized fixtures and platform-path tests.
